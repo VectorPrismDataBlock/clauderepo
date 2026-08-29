@@ -41,7 +41,7 @@ MODES = {
         "instructions": """\
 MODE: OVERVIEW
 Give the student the shape of the lesson before any detail.
-- Start with a 3-4 sentence summary of what this lesson is fundamentally about.
+- Start with a 2-3 sentence summary of what this lesson is fundamentally about.
 - Then walk the main points one at a time, in order, one point per turn.
 - After each point, check they are with you before moving on.
 - Stay at altitude. Skip examples, edge cases, and derivations entirely.
@@ -87,9 +87,32 @@ Run a spoken quiz on the lesson.
 }
 
 
-def build_instructions(mode: str, language: str, lesson: str) -> str:
+def build_instructions(
+    mode: str,
+    language: str,
+    lesson: str,
+    difficulty: str = "intermediate",
+    pace: str = "normal",
+    memory: str = "",
+) -> str:
+    adaptive = """
+ADAPTIVE COACHING
+- Set the teaching level to {difficulty}. Explain plainly at that level, using
+  simpler examples when the learner is confused and richer examples when they are
+  already comfortable.
+- Set the pace to {pace}. Keep turns brief and adjust the cadence to match this target.
+- Use the learner memory below when it helps, but do not repeat obvious points.
+- If the learner struggles, slow down and ask a scaffolded question. If they are
+  confident, move to deeper reasoning or a concrete example.
+{memory_block}
+""".format(
+        difficulty=difficulty,
+        pace=pace,
+        memory_block=(f"\nLEARNER MEMORY\n{memory}\n" if memory.strip() else ""),
+    )
+
     return SHARED_PREAMBLE.format(
         language=language,
-        mode_instructions=MODES[mode]["instructions"],
+        mode_instructions=adaptive + MODES[mode]["instructions"],
         lesson=lesson,
     )

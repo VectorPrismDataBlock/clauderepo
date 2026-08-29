@@ -16,6 +16,10 @@ class SessionRequest(BaseModel):
     lesson_url: str
     language: str = "English"
     mode: str = "overview"
+    listening_mode: str = "auto"
+    difficulty: str = "intermediate"
+    pace: str = "normal"
+    memory: str = ""
 
 
 @app.get("/api/modes")
@@ -52,16 +56,29 @@ async def lesson_proxy(url: str):
 async def create_session(req: SessionRequest):
     if req.mode not in MODES:
         raise HTTPException(400, f"Unknown mode: {req.mode}")
+    if req.listening_mode not in {"auto", "manual"}:
+        raise HTTPException(400, f"Unknown listening mode: {req.listening_mode}")
 
     try:
         _, lesson, title = await fetch_lesson(req.lesson_url)
     except LessonError as exc:
         raise HTTPException(exc.status, exc.message) from exc
 
-    instructions = build_instructions(req.mode, req.language.strip() or "English", lesson)
+    instructions = build_instructions(
+        req.mode,
+        req.language.strip() or "English",
+        lesson,
+        difficulty=req.difficulty,
+        pace=req.pace,
+        memory=req.memory,
+    )
 
     try:
-        client_secret = await mint_client_secret(req.api_key.strip(), instructions)
+        client_secret = await mint_client_secret(
+            req.api_key.strip(),
+            instructions,
+            listening_mode=req.listening_mode,
+        )
     except RealtimeError as exc:
         raise HTTPException(exc.status, exc.message) from exc
 

@@ -40,9 +40,36 @@
         <select id="mode"></select>
       </div>
 
+      <div class="field">
+        <label for="difficulty">Difficulty</label>
+        <select id="difficulty">
+          <option value="beginner">Beginner</option>
+          <option value="intermediate" selected>Intermediate</option>
+          <option value="advanced">Advanced</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="pace">Pace</label>
+        <select id="pace">
+          <option value="slow">Slow</option>
+          <option value="normal" selected>Normal</option>
+          <option value="fast">Fast</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="listening-mode">Listening</label>
+        <select id="listening-mode">
+          <option value="auto">Auto</option>
+          <option value="manual">Manual</option>
+        </select>
+      </div>
+
       <div class="field actions">
         <button id="load" class="secondary">Load</button>
         <button id="start">Start</button>
+        <button id="listen" class="secondary" disabled>Listen</button>
         <button id="mute" class="secondary" disabled>Mute</button>
         <button id="stop" class="secondary" disabled>End</button>
       </div>
@@ -69,6 +96,22 @@
         </div>
         <button id="clear" class="ghost">Clear chat</button>
       </div>
+
+      <div class="chat-panels">
+        <div class="mini-panel">
+          <h3>Session summary</h3>
+          <p id="session-summary">No session yet.</p>
+        </div>
+        <div class="mini-panel">
+          <h3>Learner profile</h3>
+          <ul id="learner-profile"></ul>
+        </div>
+        <div class="mini-panel">
+          <h3>Session history</h3>
+          <ul id="session-history"></ul>
+        </div>
+      </div>
+
       <div class="transcript" id="transcript"></div>
       <p id="status" class="status">Paste a lesson URL and press Start.</p>
     </section>

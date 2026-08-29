@@ -23,8 +23,15 @@ class RealtimeError(Exception):
         self.message = message
 
 
-async def mint_client_secret(api_key: str, instructions: str, voice: str = DEFAULT_VOICE) -> str:
+async def mint_client_secret(
+    api_key: str,
+    instructions: str,
+    voice: str = DEFAULT_VOICE,
+    listening_mode: str = "auto",
+) -> str:
     """Return the ephemeral key string for a configured tutor session."""
+    turn_detection = TURN_DETECTION if listening_mode == "auto" else {"type": "none"}
+
     payload = {
         "session": {
             "type": "realtime",
@@ -33,7 +40,7 @@ async def mint_client_secret(api_key: str, instructions: str, voice: str = DEFAU
             "audio": {
                 "input": {
                     "transcription": {"model": INPUT_TRANSCRIPTION_MODEL},
-                    "turn_detection": TURN_DETECTION,
+                    "turn_detection": turn_detection,
                 },
                 "output": {"voice": voice},
             },
