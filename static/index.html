@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Tutor</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app">
+
+    <header class="settings">
+      <div class="field key">
+        <label for="api-key">API key</label>
+        <input type="password" id="api-key" placeholder="sk-..." autocomplete="off" />
+      </div>
+
+      <div class="field url">
+        <label for="lesson-url">Lesson URL</label>
+        <input type="url" id="lesson-url" placeholder="https://example.com/lesson" />
+      </div>
+
+      <div class="field">
+        <label for="language">Language</label>
+        <input id="language" list="languages" value="English" />
+        <datalist id="languages">
+          <option>English</option>
+          <option>Spanish</option>
+          <option>French</option>
+          <option>German</option>
+          <option>Portuguese</option>
+          <option>Italian</option>
+          <option>Japanese</option>
+          <option>Mandarin Chinese</option>
+        </datalist>
+      </div>
+
+      <div class="field">
+        <label for="mode">Mode</label>
+        <select id="mode"></select>
+      </div>
+
+      <div class="field actions">
+        <button id="load" class="secondary">Load</button>
+        <button id="start">Start</button>
+        <button id="mute" class="secondary" disabled>Mute</button>
+        <button id="stop" class="secondary" disabled>End</button>
+      </div>
+    </header>
+
+    <section class="lesson-pane">
+      <div class="pane-bar">
+        <span id="lesson-title">No lesson loaded</span>
+        <button id="reader-toggle" class="ghost" disabled>Reader</button>
+      </div>
+      <div class="frame-wrap">
+        <!-- allow-scripts WITHOUT allow-same-origin: the page renders, but
+             since we serve it from our own origin it must stay opaque. -->
+        <iframe id="lesson-frame" sandbox="allow-scripts allow-popups allow-forms" title="Lesson"></iframe>
+        <pre id="lesson-reader" class="reader"></pre>
+        <p id="lesson-empty" class="empty">Paste a lesson URL above and press Load.</p>
+      </div>
+    </section>
+
+    <section class="chat-pane">
+      <div class="pane-bar">
+        <div id="listening" class="listening">
+          <span class="dot"></span><span id="listening-text">Idle</span>
+        </div>
+        <button id="clear" class="ghost">Clear chat</button>
+      </div>
+      <div class="transcript" id="transcript"></div>
+      <p id="status" class="status">Paste a lesson URL and press Start.</p>
+    </section>
+
+  </div>
+
+  <audio id="tutor-audio" autoplay></audio>
+  <script src="/app.js"></script>
+</body>
+</html>
