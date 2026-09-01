@@ -3,10 +3,38 @@ const SDP_URL = "https://api.openai.com/v1/realtime/calls";
 const STORAGE_KEY = "voice-tutor-profile";
 const HISTORY_KEY = "voice-tutor-session-history";
 
+// --- turn-based engine tuning ---------------------------------------------
+const SPEECH_RMS = 0.015;        // above this counts as speech
+const SILENCE_MS = 1100;         // trailing silence that ends a turn
+const NO_SPEECH_MS = 12000;      // nothing said at all -> discard, don't pay for STT
+const MAX_UTTERANCE_MS = 45000;  // hard cap on one student turn
+const VAD_INTERVAL_MS = 50;
+const SPEAK_CHUNK_CHARS = 240;   // flush to speech even without a sentence end
+
+// The browser synthesiser needs a BCP-47 tag, the tutor prompt takes a name.
+const VOICE_LANGS = {
+  english: "en-US",
+  spanish: "es-ES",
+  french: "fr-FR",
+  german: "de-DE",
+  portuguese: "pt-BR",
+  italian: "it-IT",
+  japanese: "ja-JP",
+  "mandarin chinese": "zh-CN",
+};
+
+const MIME_CANDIDATES = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/mp4",
+  "audio/ogg;codecs=opus",
+];
+
 const els = {
   apiKey: document.getElementById("api-key"),
   url: document.getElementById("lesson-url"),
   language: document.getElementById("language"),
+  engine: document.getElementById("engine"),
   mode: document.getElementById("mode"),
   difficulty: document.getElementById("difficulty"),
   pace: document.getElementById("pace"),
@@ -36,6 +64,14 @@ let pc = null;
 let dc = null;
 let micStream = null;
 let hasSessionStarted = false;
+
+// Turn-based engine only.
+let engine = "realtime";
+let ws = null;
+let recorder = null;
+let stopVad = null;
+let recording = false;
+let paused = false;
 
 function setStatus(text, isError = false) {
   els.status.textContent = text;
@@ -222,11 +258,27 @@ function handleEvent(event) {
     case "response.output_audio_transcript.delta":
     case "response.audio_transcript.delta":
       appendTo(`tutor-${event.item_id}`, "tutor", event.delta || "");
+      // Realtime sends real audio alongside this. The turn-based engine sends
+      // text only, so the browser speaks it as the sentences land.
+      if (engine === "pipeline") queueSpeech(event.delta || "");
       updateSessionSummary();
+      break;
+
+    // Turn-based engine: the reply is complete, so hand the floor back once
+    // the synthesiser has finished saying it.
+    case "response.done":
+      if (engine === "pipeline") endTutorTurn();
+      break;
+
+    // Turn-based engine: the clip held no speech, so no completion was billed.
+    case "response.skipped":
+      setStatus("Didn't catch that — go ahead when you're ready.");
+      openFloor();
       break;
 
     case "error":
       setStatus(`Session error: ${event.error?.message || "unknown"}`, true);
+      if (engine === "pipeline") abandonTurn();
       break;
   }
 }
@@ -240,6 +292,8 @@ async function start() {
   if (!lesson_url) return setStatus("Enter a lesson URL.", true);
 
   els.start.disabled = true;
+  engine = els.engine.value || "realtime";
+  paused = false;
   setStatus("Creating session…");
 
   try {
@@ -249,6 +303,7 @@ async function start() {
       body: JSON.stringify({
         api_key,
         lesson_url,
+        engine,
         language: els.language.value,
         mode: els.mode.value,
         listening_mode: els.listeningMode.value,
@@ -264,11 +319,13 @@ async function start() {
     if (!els.reader.textContent) await loadLesson();
 
     setStatus("Connecting audio…");
-    await connect(data.client_secret);
+    if (engine === "pipeline") await connectPipeline(data.ws);
+    else await connect(data.client_secret);
 
     els.mute.disabled = false;
     els.stop.disabled = false;
-    els.listen.disabled = els.listeningMode.value !== "manual";
+    els.engine.disabled = true;
+    if (engine === "realtime") els.listen.disabled = els.listeningMode.value !== "manual";
     hasSessionStarted = true;
   } catch (err) {
     setStatus(err.message, true);
@@ -278,6 +335,8 @@ async function start() {
 }
 
 function startListening() {
+  if (engine === "pipeline") return pipelineListenButton();
+
   if (!dc || dc.readyState !== "open") {
     setStatus("Session is not ready yet.", true);
     return;
@@ -326,9 +385,261 @@ async function connect(ephemeralKey) {
   await pc.setRemoteDescription({ type: "answer", sdp: await sdpRes.text() });
 }
 
+// --- turn-based engine ----------------------------------------------------
+// Half duplex by design. The tutor speaks, then the mic opens, then the whole
+// utterance goes up in one piece. There is no interrupting: the cheap engine
+// buys its price by never streaming audio in either direction.
+
+let discard = false;
+const speech = { buffer: "", pending: 0, turnEnded: false };
+
+async function connectPipeline(path) {
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+  const url = new URL(path, location.href);
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${scheme}//${url.host}${url.pathname}`);
+  ws.addEventListener("message", (e) => handleEvent(JSON.parse(e.data)));
+  ws.addEventListener("close", () => {
+    if (hasSessionStarted) setListening(false, "Disconnected");
+  });
+
+  await new Promise((resolve, reject) => {
+    ws.addEventListener("open", resolve, { once: true });
+    ws.addEventListener("error", () => reject(new Error("Could not open the tutor socket.")),
+      { once: true });
+  });
+
+  // Mute means something different here: there is no live stream to silence,
+  // so the button holds the turn loop instead.
+  els.mute.textContent = "Pause";
+  setStatus("Connected — the tutor is about to speak.");
+  setListening(false, "Tutor speaking");
+}
+
+// --- speaking the reply ---------------------------------------------------
+// The browser's own synthesiser: no per-character billing, no network hop, and
+// it starts on the first finished sentence while the rest is still streaming.
+
+function voiceLang() {
+  return VOICE_LANGS[(els.language.value || "").trim().toLowerCase()] || "en-US";
+}
+
+function pickVoice(lang) {
+  const voices = window.speechSynthesis?.getVoices?.() || [];
+  const base = lang.split("-")[0];
+  return voices.find((v) => v.lang === lang) || voices.find((v) => v.lang?.startsWith(base));
+}
+
+// Index of the first real sentence end, or -1. Skips the dot in "3.5", and
+// waits for the following space so a terminator mid-stream isn't cut early.
+function sentenceEnd(text) {
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if ("…。！？".includes(ch)) return i;
+    if (!".!?".includes(ch)) continue;
+    if (ch === "." && /\d/.test(text[i - 1] || "") && /\d/.test(text[i + 1] || "")) continue;
+    if (i + 1 < text.length && /\s/.test(text[i + 1])) return i;
+  }
+  return -1;
+}
+
+function say(text) {
+  const line = text.trim();
+  if (!line || !window.speechSynthesis) return;
+
+  const utterance = new SpeechSynthesisUtterance(line);
+  utterance.lang = voiceLang();
+  const voice = pickVoice(utterance.lang);
+  if (voice) utterance.voice = voice;
+  utterance.onend = utterance.onerror = () => {
+    speech.pending = Math.max(0, speech.pending - 1);
+    if (!speech.pending && speech.turnEnded) openFloor();
+  };
+
+  speech.pending += 1;
+  window.speechSynthesis.speak(utterance);
+}
+
+function flushSpeech(force) {
+  for (let cut = sentenceEnd(speech.buffer); cut !== -1; cut = sentenceEnd(speech.buffer)) {
+    say(speech.buffer.slice(0, cut + 1));
+    speech.buffer = speech.buffer.slice(cut + 1);
+  }
+  if (force) {
+    say(speech.buffer);
+    speech.buffer = "";
+  } else if (speech.buffer.length > SPEAK_CHUNK_CHARS) {
+    // A long clause with no terminator in sight — break at a word boundary so
+    // the student isn't left waiting on silence.
+    const space = speech.buffer.lastIndexOf(" ");
+    if (space > 0) {
+      say(speech.buffer.slice(0, space));
+      speech.buffer = speech.buffer.slice(space + 1);
+    }
+  }
+}
+
+function queueSpeech(delta) {
+  if (speech.turnEnded) speech.turnEnded = false;
+  if (!speech.buffer && !speech.pending) {
+    setListening(false, "Tutor speaking");
+    setStatus("Tutor is answering…");
+  }
+  speech.buffer += delta;
+  flushSpeech(false);
+}
+
+function endTutorTurn() {
+  flushSpeech(true);
+  speech.turnEnded = true;
+  // No synthesiser (or nothing left to say) means nothing will call us back.
+  if (!speech.pending) openFloor();
+}
+
+// --- taking the student's turn --------------------------------------------
+
+function openFloor() {
+  speech.turnEnded = false;
+  if (paused || ws?.readyState !== WebSocket.OPEN) return;
+
+  if (els.listeningMode.value === "auto") {
+    startRecording();
+  } else {
+    els.listen.disabled = false;
+    els.listen.textContent = "Listen";
+    setListening(false, "Ready");
+    setStatus("Press Listen when you want to answer.");
+  }
+}
+
+function startRecording() {
+  if (recording || paused || !micStream || ws?.readyState !== WebSocket.OPEN) return;
+
+  const supported = MIME_CANDIDATES.find(
+    (m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+  const chunks = [];
+  discard = false;
+  recorder = new MediaRecorder(micStream, supported ? { mimeType: supported } : undefined);
+  const mime = recorder.mimeType || supported || "audio/webm";
+
+  recorder.addEventListener("dataavailable", (e) => {
+    if (e.data && e.data.size) chunks.push(e.data);
+  });
+
+  recorder.addEventListener("stop", async () => {
+    recording = false;
+    recorder = null;
+    if (stopVad) { stopVad(); stopVad = null; }
+    els.listen.textContent = "Listen";
+    els.listen.disabled = true;
+
+    // Nothing worth sending. Re-open on a timer rather than straight away, so
+    // a recorder that yields no data can't spin the loop.
+    if (discard || !chunks.length) return void setTimeout(openFloor, 300);
+    if (ws?.readyState !== WebSocket.OPEN) return;
+
+    setListening(false, "Thinking…");
+    setStatus("Transcribing…");
+    const blob = new Blob(chunks, { type: mime });
+    ws.send(JSON.stringify({ type: "utterance", mime, data: await toBase64(blob) }));
+  });
+
+  recorder.start();
+  recording = true;
+  els.listen.disabled = false;
+  els.listen.textContent = "Send";
+  setListening(false, "Listening");
+  setStatus("Your turn — speak, then pause.");
+
+  const auto = els.listeningMode.value === "auto";
+  stopVad = watchLevels(micStream, {
+    onSpeech: () => setListening(true, "Hearing you…"),
+    onEnd: auto ? () => finishRecording(true) : null,
+    onNothing: auto ? () => finishRecording(false) : null,
+  });
+}
+
+function finishRecording(send) {
+  if (!recording || !recorder) return;
+  discard = !send;
+  try { recorder.stop(); } catch { /* already stopping */ }
+}
+
+function abandonTurn() {
+  window.speechSynthesis?.cancel();
+  speech.buffer = "";
+  speech.pending = 0;
+  speech.turnEnded = false;
+  finishRecording(false);
+}
+
+function pipelineListenButton() {
+  if (recording) finishRecording(true);
+  else openFloor();
+}
+
+/** Poll the mic level to find the end of the student's turn. */
+function watchLevels(stream, { onSpeech, onEnd, onNothing }) {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null; // no level metering — the Send button still works
+
+  const ctx = new Ctx();
+  ctx.resume().catch(() => {}); // a suspended context reads as pure silence
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const samples = new Float32Array(analyser.fftSize);
+
+  const started = Date.now();
+  let heard = false;
+  let speaking = false;
+  let quietSince = 0;
+
+  const timer = setInterval(() => {
+    analyser.getFloatTimeDomainData(samples);
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+    const rms = Math.sqrt(sum / samples.length);
+    const now = Date.now();
+
+    if (rms > SPEECH_RMS) {
+      if (!speaking) { speaking = true; onSpeech(); }
+      heard = true;
+      quietSince = 0;
+    } else if (heard) {
+      speaking = false;
+      if (!quietSince) quietSince = now;
+      else if (now - quietSince > SILENCE_MS && onEnd) return onEnd();
+    } else if (now - started > NO_SPEECH_MS && onNothing) {
+      // Nothing said at all. Drop the clip rather than pay to transcribe air.
+      return onNothing();
+    }
+
+    if (now - started > MAX_UTTERANCE_MS && onEnd) onEnd();
+  }, VAD_INTERVAL_MS);
+
+  return () => { clearInterval(timer); ctx.close().catch(() => {}); };
+}
+
+async function toBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const step = 0x8000; // chunked: apply() blows the stack on a whole utterance
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+  }
+  return btoa(binary);
+}
+
 async function teardown() {
   if (dc) { dc.close(); dc = null; }
   if (pc) { pc.close(); pc = null; }
+  if (ws) { ws.close(); ws = null; }
+  abandonTurn();
+  recorder = null;
+  recording = false;
+  if (stopVad) { stopVad(); stopVad = null; }
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
   els.audio.srcObject = null;
 }
@@ -351,15 +662,37 @@ async function stop() {
   syncProfileUI();
 
   await teardown();
+  hasSessionStarted = false;
+  paused = false;
   els.start.disabled = false;
   els.mute.disabled = true;
   els.stop.disabled = true;
+  els.listen.disabled = true;
+  els.listen.textContent = "Listen";
   els.mute.textContent = "Mute";
+  els.engine.disabled = false;
   setListening(false, "Idle");
   setStatus("Session ended.");
 }
 
 function toggleMute() {
+  // The turn-based engine has no live stream to silence, so the same button
+  // holds the turn loop instead of muting a track.
+  if (engine === "pipeline") {
+    paused = !paused;
+    els.mute.textContent = paused ? "Resume" : "Pause";
+    if (paused) {
+      abandonTurn();
+      els.listen.disabled = true;
+      setListening(false, "Paused");
+      setStatus("Paused — press Resume to carry on.");
+    } else {
+      setStatus("Resumed.");
+      openFloor();
+    }
+    return;
+  }
+
   if (!micStream) return;
   const track = micStream.getAudioTracks()[0];
   track.enabled = !track.enabled;
@@ -374,6 +707,19 @@ async function loadModes() {
     .join("");
 }
 
+async function loadEngines() {
+  const engines = await (await fetch("/api/engines")).json();
+  els.engine.innerHTML = engines
+    .map((e) => `<option value="${e.id}" title="${e.description}">${e.label}</option>`)
+    .join("");
+  describeEngine();
+}
+
+function describeEngine() {
+  const option = els.engine.selectedOptions[0];
+  els.engine.title = option ? option.title : "";
+}
+
 els.load.addEventListener("click", loadLesson);
 els.start.addEventListener("click", start);
 els.listen.addEventListener("click", startListening);
@@ -383,8 +729,19 @@ els.clear.addEventListener("click", clearChat);
 els.readerToggle.addEventListener("click", () =>
   showReader(!els.reader.classList.contains("visible")));
 els.url.addEventListener("keydown", (e) => { if (e.key === "Enter") loadLesson(); });
+els.engine.addEventListener("change", describeEngine);
 els.listeningMode.addEventListener("change", () => {
   const manual = els.listeningMode.value === "manual";
+
+  if (engine === "pipeline") {
+    // Auto and manual differ only in who ends the turn, so the switch can take
+    // effect mid-session. A recording already running keeps the rule it began
+    // with; the change lands on the next turn.
+    els.listen.disabled = !hasSessionStarted || (!manual && !recording);
+    if (!manual && hasSessionStarted && !recording) openFloor();
+    return;
+  }
+
   els.listen.disabled = !hasSessionStarted || !manual;
   if (!manual && dc && dc.readyState === "open") {
     setStatus("Connected — just start talking, no button needed.");
@@ -393,3 +750,4 @@ els.listeningMode.addEventListener("change", () => {
 
 syncProfileUI();
 loadModes();
+loadEngines();
