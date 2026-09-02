@@ -134,9 +134,20 @@ near("recent answers dominate (EWMA alpha 0.3)",
   app.proficiencyOf(graded("correct", "correct", "correct", "incorrect", "incorrect")), 0.49);
 near("partial credit counts for half", app.proficiencyOf(graded("partial")), 0.5);
 
-is("bands read low at the bottom", app.proficiencyBand(0.2).cls, "low");
-is("bands read mid in the middle", app.proficiencyBand(0.49).label, "Building");
-is("bands top out at strong", app.proficiencyBand(0.95).label, "Strong");
+is("bands read critical at the bottom", app.proficiencyBand(0.2).cls, "critical");
+is("bands read warning in the middle", app.proficiencyBand(0.49).cls, "warning");
+is("bands top out good", app.proficiencyBand(0.95).cls, "good");
+
+// Every class a band can emit must actually exist as a dial fill rule,
+// or the arc silently stays grey.
+const css = fs.readFileSync(path.join(__dirname, "..", "static", "style.css"), "utf8");
+for (const at of [0.1, 0.45, 0.7, 0.99]) {
+  const cls = app.proficiencyBand(at).cls;
+  is(`css defines .dial-fill.${cls}`, css.includes(`.dial-fill.${cls} {`), true);
+}
+for (const cls of ["good", "warning", "critical"]) {
+  is(`css defines cost state .dial-fill.${cls}`, css.includes(`.dial-fill.${cls} {`), true);
+}
 
 // --- dial geometry ---
 // The arc path is hardcoded in index.html; if these drift the fill stops

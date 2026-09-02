@@ -53,7 +53,7 @@ app/
   assess.py     grades one answer, for the proficiency gauge
   config.py     models, voice, VAD, engine, PRICING, scoring constants
 static/
-  index.html    three-pane UI
+  index.html    three-pane UI; chat pane is bar / meters / drawer / transcript
   app.js        both engines, transcript, speech synthesis, cost, scoring, archive
   style.css
 ```
@@ -120,8 +120,13 @@ Listening `auto` / `manual` works in both: `auto` ends your turn for you,
 
 ## Tracking a student
 
-Four panels sit above the transcript. Everything they show is derived from real
-API usage and real graded answers -- nothing is inferred from turn counts.
+The transcript owns the chat pane. Above it sits one compact strip: two small
+meters and their numbers. Everything else -- the learner profile, the session
+summary, the export controls -- lives in a drawer that is collapsed by default,
+because it is reference data rather than something to watch while you talk.
+
+Everything shown is derived from real API usage and real graded answers, not
+inferred from turn counts.
 
 ### Cost ticker
 
@@ -175,9 +180,15 @@ scores nothing either way.
 
 ### About those two dials
 
-Both meters are the same 240-degree arc so they read as a pair. Proficiency is
-a ratio against a limit and cost is a ratio against a budget -- which is what a
-meter is for. Neither is a donut or a pie; nothing is being compared by angle.
+Both meters are the same 240-degree arc, 84px wide, side by side on one row.
+Proficiency is a ratio against a limit and cost is a ratio against a budget --
+which is what a meter is for. Neither is a donut or a pie; nothing is being
+compared by angle.
+
+They are deliberately small. The transcript is the product; the meters are
+instrumentation, and instrumentation that crowds out the thing it measures is
+worse than none. Their size is fixed in pixels, never a percentage of the pane,
+so they cannot grow into the conversation.
 
 Three rules they follow, all worth keeping if you edit them:
 
@@ -192,7 +203,8 @@ Three rules they follow, all worth keeping if you edit them:
   showing where the bands fall, not state.
 
 Arc geometry is hardcoded in `index.html` and re-derived in
-`tests/frontend_math.test.js`, so the fill cannot drift off the track unnoticed.
+`tests/frontend_math.test.js`, which also asserts that every state class a band
+can emit exists as a `.dial-fill` rule -- otherwise the arc silently stays grey.
 
 ### Learner profile
 

@@ -427,10 +427,10 @@ function proficiencyOf(session) {
 }
 
 function proficiencyBand(value) {
-  if (value < 0.35) return { label: "Finding your feet", cls: "low" };
-  if (value < 0.6) return { label: "Building", cls: "mid" };
-  if (value < 0.8) return { label: "Solid", cls: "" };
-  return { label: "Strong", cls: "" };
+  if (value < 0.35) return { label: "Starting out", cls: "critical" };
+  if (value < 0.6) return { label: "Building", cls: "warning" };
+  if (value < 0.8) return { label: "Solid", cls: "good" };
+  return { label: "Strong", cls: "good" };
 }
 
 async function gradeAnswer(question, answer) {
@@ -569,8 +569,11 @@ function renderSparkline(svg, trail) {
 
   const line = points.map((v, i) => `${(i * step).toFixed(2)},${y(v).toFixed(2)}`).join(" ");
   const last = points[points.length - 1];
+  // A faint area under the line so a lone rising stroke does not read as a
+  // stray diagonal in a panel this small.
   svg.innerHTML =
-    `<polyline points="${line}" vector-effect="non-scaling-stroke" />`
+    `<polygon points="0,22 ${line} 100,22" />`
+    + `<polyline points="${line}" vector-effect="non-scaling-stroke" />`
     + `<circle cx="100" cy="${y(last).toFixed(2)}" r="2" vector-effect="non-scaling-stroke" />`;
 }
 
@@ -586,14 +589,13 @@ function renderProficiency() {
   const graded = ((session && session.assessments) || []).length;
 
   renderTicks(els.profTicks, PROF_TICKS);
-  els.profCount.textContent = graded ? `${graded} graded` : "";
+  els.profCount.textContent = graded ? `${graded} graded` : "Proficiency";
 
   if (value == null) {
     setDial(els.profArc, 0, "");
     els.profValue.textContent = "--";
-    els.profLabel.textContent = session
-      ? "Answer a question to start scoring."
-      : "Not assessed yet.";
+    els.profLabel.textContent = session ? "Awaiting answers" : "Not assessed";
+    els.profCount.textContent = "Proficiency";
     els.profNote.textContent = "";
     return;
   }
@@ -620,16 +622,15 @@ function renderCost() {
   renderSparkline(els.costSpark, cost.trail);
 
   if (!budget) {
-    els.costLabel.textContent = `${money(allTimeCost())} all time`;
+    els.costLabel.textContent = "no budget set";
   } else if (fraction > 1) {
-    els.costLabel.innerHTML =
-      `<span class="state">${money(cost.total - budget)} over</span> the ${money(budget)} budget`;
+    els.costLabel.innerHTML = `<span class="state">${money(cost.total - budget)} over</span>`;
   } else {
     els.costLabel.innerHTML =
       `<span class="state">${Math.round(fraction * 100)}%</span> of ${money(budget)}`;
   }
 
-  els.costAsof.textContent = prices ? `rates ${prices.as_of}` : "no rates";
+  els.costAsof.textContent = prices ? "Cost" : "No rates";
   els.costBreakdown.textContent = costBreakdown(cost);
 }
 
@@ -648,7 +649,7 @@ function costBreakdown(cost) {
     .filter(([, usd]) => usd > 0)
     .map(([kind, usd]) => `${kind} ${money(usd)}`);
 
-  if (!parts.length && !cost.unpriced) return `${money(allTimeCost())} all time`;
+  if (!parts.length && !cost.unpriced) return `${money(allTimeCost())} all time · rates ${prices.as_of}`;
 
   const notes = [];
   if (parts.length) notes.push(parts.join(" · "));
@@ -757,6 +758,9 @@ function renderTranscript() {
   for (const turn of session.turns) {
     appendTo(`${session.id}-${turn.at}-${turn.role}`, turn.role, turn.text);
   }
+  // appendTo follows the live conversation to the bottom; an archive should
+  // open at the start of it instead.
+  els.transcript.scrollTop = 0;
 }
 
 function renderAll() {

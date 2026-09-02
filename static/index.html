@@ -99,65 +99,67 @@
         <div id="listening" class="listening">
           <span class="dot"></span><span id="listening-text">Idle</span>
         </div>
+        <select id="session-picker" class="bar-select" title="Load a past session"></select>
         <button id="clear" class="ghost">Clear chat</button>
       </div>
 
-      <div class="chat-panels">
-        <div class="mini-panel">
-          <h3>Proficiency <span id="prof-count" class="tag"></span></h3>
-          <div class="dial">
-            <svg viewBox="0 0 120 84" role="img" aria-labelledby="prof-label">
-              <path class="dial-track" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
-              <g class="dial-ticks" id="prof-ticks"></g>
-              <path class="dial-fill" id="prof-arc" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
-            </svg>
-            <div class="dial-center">
-              <span class="dial-value" id="prof-value">--</span>
-            </div>
+      <!-- One compact strip: two small meters and their supporting numbers.
+           Everything else lives in the drawer so the transcript keeps the pane. -->
+      <div class="metrics">
+        <figure class="dial">
+          <figcaption class="dial-sub" id="prof-count">Proficiency</figcaption>
+          <svg viewBox="0 0 120 84" role="img" aria-labelledby="prof-label">
+            <path class="dial-track" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
+            <g class="dial-ticks" id="prof-ticks"></g>
+            <path class="dial-fill" id="prof-arc" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
+          </svg>
+          <div class="dial-readout">
+            <span class="dial-value" id="prof-value">--</span>
+            <span class="dial-label" id="prof-label">Not assessed</span>
           </div>
-          <p id="prof-label" class="dial-label">Not assessed yet.</p>
-          <p id="prof-note" class="fine"></p>
-        </div>
+        </figure>
 
-        <div class="mini-panel">
-          <h3>Cost <span class="tag" id="cost-asof">estimate</span></h3>
-          <div class="dial">
-            <svg viewBox="0 0 120 84" role="img" aria-labelledby="cost-label">
-              <path class="dial-track" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
-              <g class="dial-ticks" id="cost-ticks"></g>
-              <path class="dial-fill" id="cost-arc" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
-            </svg>
-            <div class="dial-center">
-              <span class="dial-value" id="cost-session">$0.0000</span>
-            </div>
+        <figure class="dial">
+          <figcaption class="dial-sub" id="cost-asof">Cost</figcaption>
+          <svg viewBox="0 0 120 84" role="img" aria-labelledby="cost-label">
+            <path class="dial-track" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
+            <g class="dial-ticks" id="cost-ticks"></g>
+            <path class="dial-fill" id="cost-arc" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
+          </svg>
+          <div class="dial-readout">
+            <span class="dial-value" id="cost-session">$0.0000</span>
+            <span class="dial-label" id="cost-label">of budget</span>
           </div>
-          <p id="cost-label" class="dial-label">of budget</p>
-          <svg class="spark" id="cost-spark" viewBox="0 0 100 22" preserveAspectRatio="none"
-               role="img" aria-label="Cumulative spend this session"></svg>
+        </figure>
+
+        <div class="metrics-meta">
           <p id="cost-breakdown" class="fine"></p>
-          <div class="panel-actions">
+          <div class="spark-wrap">
+            <span class="dial-sub">Spend this session</span>
+            <svg class="spark" id="cost-spark" viewBox="0 0 100 22" preserveAspectRatio="none"
+                 role="img" aria-label="Cumulative spend this session"></svg>
+          </div>
+          <div class="meta-actions">
             <label class="inline-field" for="budget">Budget $</label>
             <input id="budget" class="mini-input" type="number" min="0" step="0.05" />
             <button id="cost-clear" class="ghost">Clear</button>
           </div>
         </div>
+      </div>
 
-        <div class="mini-panel wide">
-          <h3>Learner profile</h3>
+      <details class="drawer">
+        <summary>Learner profile &amp; session data</summary>
+        <div class="drawer-body">
           <ul id="learner-profile"></ul>
-        </div>
-
-        <div class="mini-panel wide">
-          <h3>Sessions</h3>
-          <select id="session-picker"></select>
-          <p id="session-summary">No session yet.</p>
+          <p id="prof-note" class="fine"></p>
+          <p id="session-summary" class="fine">No session yet.</p>
           <div class="panel-actions">
             <button id="export" class="ghost">Export JSON</button>
             <button id="delete-session" class="ghost" disabled>Delete</button>
             <button id="forget-all" class="ghost">Forget all</button>
           </div>
         </div>
-      </div>
+      </details>
 
       <div class="transcript" id="transcript"></div>
       <p id="status" class="status">Paste a lesson URL and press Start.</p>
