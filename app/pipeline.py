@@ -77,17 +77,20 @@ async def transcribe(api_key: str, audio: bytes, mime: str) -> str:
     return (response.json().get("text") or "").strip()
 
 
-async def stream_reply(api_key: str, messages: list[dict]) -> AsyncIterator[str]:
-    """Yield the tutor's reply in text deltas as the model produces them.
+async def stream_reply(api_key: str, messages: list[dict]) -> AsyncIterator[dict]:
+    """Yield `{"delta": text}` events, then one `{"usage": {...}}` at the end.
 
     Streaming is what makes the latency tolerable: the browser starts speaking
-    the first sentence while the rest is still being written.
+    the first sentence while the rest is still being written. The trailing
+    usage chunk is what the cost ticker is built on -- it reports real token
+    counts, including how many were served from the prompt cache.
     """
     payload = {
         "model": PIPELINE_CHAT_MODEL,
         "messages": messages,
         "max_completion_tokens": PIPELINE_MAX_TOKENS,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     # Generous read timeout: the first token can be slow, later ones are not.
@@ -112,9 +115,12 @@ async def stream_reply(api_key: str, messages: list[dict]) -> AsyncIterator[str]
                         chunk = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    # The usage chunk arrives last and carries no choices.
+                    if chunk.get("usage"):
+                        yield {"usage": chunk["usage"]}
                     for choice in chunk.get("choices") or []:
                         delta = (choice.get("delta") or {}).get("content")
                         if delta:
-                            yield delta
+                            yield {"delta": delta}
         except httpx.RequestError as exc:
             raise PipelineError(502, f"Could not reach OpenAI: {exc}") from exc

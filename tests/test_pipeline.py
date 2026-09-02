@@ -69,12 +69,17 @@ class FakeClient:
         return FakeStream(type(self).response)
 
 
-def sse(*deltas):
+USAGE = {"prompt_tokens": 900, "completion_tokens": 12,
+         "prompt_tokens_details": {"cached_tokens": 768}}
+
+
+def sse(*deltas, usage=None):
     lines = [
         "data: " + json.dumps({"choices": [{"delta": {"content": d}}]}) for d in deltas
     ]
+    tail = ["data: " + json.dumps({"choices": [], "usage": usage})] if usage else []
     # A keepalive blank line and the terminator, exactly as the API sends them.
-    return [lines[0], ""] + lines[1:] + ["data: [DONE]"]
+    return [lines[0], ""] + lines[1:] + tail + ["data: [DONE]"]
 
 
 class TranscribeTests(unittest.TestCase):
@@ -101,8 +106,17 @@ class StreamReplyTests(unittest.TestCase):
         with patch("app.pipeline.httpx.AsyncClient", FakeClient):
             chunks = run(collect(stream_reply("k", [{"role": "system", "content": "s"}])))
 
-        self.assertEqual(chunks, ["Hel", "lo."])
+        self.assertEqual(chunks, [{"delta": "Hel"}, {"delta": "lo."}])
         self.assertTrue(FakeClient.last_kwargs["json"]["stream"])
+
+    def test_asks_for_usage_and_yields_it_last_for_the_cost_ticker(self):
+        FakeClient.response = FakeResponse(lines=sse("Hi", ".", usage=USAGE))
+        with patch("app.pipeline.httpx.AsyncClient", FakeClient):
+            chunks = run(collect(stream_reply("k", [{"role": "system", "content": "s"}])))
+
+        self.assertTrue(FakeClient.last_kwargs["json"]["stream_options"]["include_usage"])
+        self.assertEqual(chunks[-1], {"usage": USAGE})
+        self.assertEqual([c["delta"] for c in chunks[:-1]], ["Hi", "."])
 
 
 class SessionTests(unittest.TestCase):

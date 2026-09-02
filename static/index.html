@@ -104,16 +104,37 @@
 
       <div class="chat-panels">
         <div class="mini-panel">
-          <h3>Session summary</h3>
-          <p id="session-summary">No session yet.</p>
+          <h3>Proficiency <span id="prof-count" class="tag"></span></h3>
+          <div class="gauge"><div class="gauge-fill" id="prof-fill"></div></div>
+          <p id="prof-label" class="gauge-label">Not assessed yet.</p>
         </div>
+
         <div class="mini-panel">
+          <h3>Cost <span class="tag" title="Priced from a rate table in app/config.py — verify it.">estimate</span></h3>
+          <p class="ticker">
+            <span id="cost-session">$0.0000</span><span class="unit">session</span>
+            <span id="cost-total" class="secondary-figure">$0.0000</span><span class="unit">all time</span>
+          </p>
+          <p id="cost-breakdown" class="fine"></p>
+          <div class="panel-actions">
+            <button id="cost-clear" class="ghost">Clear ticker</button>
+          </div>
+        </div>
+
+        <div class="mini-panel wide">
           <h3>Learner profile</h3>
           <ul id="learner-profile"></ul>
         </div>
-        <div class="mini-panel">
-          <h3>Session history</h3>
-          <ul id="session-history"></ul>
+
+        <div class="mini-panel wide">
+          <h3>Sessions</h3>
+          <select id="session-picker"></select>
+          <p id="session-summary">No session yet.</p>
+          <div class="panel-actions">
+            <button id="export" class="ghost">Export JSON</button>
+            <button id="delete-session" class="ghost" disabled>Delete</button>
+            <button id="forget-all" class="ghost">Forget all</button>
+          </div>
         </div>
       </div>
 

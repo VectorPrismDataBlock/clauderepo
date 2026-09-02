@@ -16,9 +16,14 @@ async def fake_fetch_lesson(url):
     return LESSON
 
 
+REPLY_USAGE = {"prompt_tokens": 1200, "completion_tokens": 9,
+               "prompt_tokens_details": {"cached_tokens": 1024}}
+
+
 async def fake_stream_reply(api_key, messages):
     for delta in ["Let's start. ", "What is a cell?"]:
-        yield delta
+        yield {"delta": delta}
+    yield {"usage": REPLY_USAGE}
 
 
 async def fake_transcribe(api_key, audio, mime):
@@ -26,8 +31,13 @@ async def fake_transcribe(api_key, audio, mime):
     return "" if audio == b"\x00" else "The mitochondria."
 
 
-def utterance(data: bytes):
-    return {"type": "utterance", "mime": "audio/webm", "data": base64.b64encode(data).decode()}
+def utterance(data: bytes, seconds: float = 3.0):
+    return {
+        "type": "utterance",
+        "mime": "audio/webm",
+        "seconds": seconds,
+        "data": base64.b64encode(data).decode(),
+    }
 
 
 def session_body(engine):
@@ -73,16 +83,25 @@ class EngineSelectionTests(unittest.TestCase):
 class PipelineSocketTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        self.usage = []
         with patch("app.main.fetch_lesson", fake_fetch_lesson):
             self.session_id = self.client.post(
                 "/api/session", json=session_body("pipeline")
             ).json()["session_id"]
 
+    def next_event(self, socket):
+        """Next event that isn't a usage report; usage is banked for the ticker."""
+        while True:
+            event = socket.receive_json()
+            if event["type"] != "usage":
+                return event
+            self.usage.append(event)
+
     def drain_turn(self, socket):
         """Collect one tutor turn's deltas, up to response.done."""
         deltas = []
         while True:
-            event = socket.receive_json()
+            event = self.next_event(socket)
             if event["type"] == "response.done":
                 return "".join(deltas), event
             if event["type"] == "response.output_audio_transcript.delta":
@@ -95,8 +114,8 @@ class PipelineSocketTests(unittest.TestCase):
                 greeting, _ = self.drain_turn(socket)
                 self.assertEqual(greeting, "Let's start. What is a cell?")
 
-                socket.send_json(utterance(b"spoken-audio"))
-                heard = socket.receive_json()
+                socket.send_json(utterance(b"spoken-audio", seconds=4.5))
+                heard = self.next_event(socket)
                 self.assertEqual(
                     heard["type"], "conversation.item.input_audio_transcription.completed"
                 )
@@ -106,21 +125,31 @@ class PipelineSocketTests(unittest.TestCase):
                 self.assertEqual(reply, "Let's start. What is a cell?")
                 self.assertTrue(done["item_id"])
 
+        # Both cost legs reported raw, for the browser to price.
+        stt = [u for u in self.usage if u["kind"] == "stt"]
+        chat = [u for u in self.usage if u["kind"] == "chat"]
+        self.assertEqual(stt[0]["seconds"], 4.5)
+        self.assertEqual(chat[0]["usage"], REPLY_USAGE)
+
     def test_silence_is_skipped_instead_of_billed_as_a_completion(self):
         calls = []
 
         async def counting_stream(api_key, messages):
             calls.append(messages)
-            yield "hi"
+            yield {"delta": "hi"}
 
         with patch("app.main.stream_reply", counting_stream), \
              patch("app.main.transcribe", fake_transcribe):
             with self.client.websocket_connect(f"/api/pipeline/ws/{self.session_id}") as socket:
                 self.drain_turn(socket)  # greeting
-                socket.send_json(utterance(b"\x00"))
-                self.assertEqual(socket.receive_json()["type"], "response.skipped")
+                socket.send_json(utterance(b"\x00", seconds=2.0))
+                self.assertEqual(self.next_event(socket)["type"], "response.skipped")
 
         self.assertEqual(len(calls), 1)  # the greeting only
+
+        # Silence is still transcribed, so the ticker hears about that much.
+        kinds = [u["kind"] for u in self.usage]
+        self.assertIn("stt", kinds)
 
     def test_closing_the_socket_forgets_the_session_and_its_key(self):
         with patch("app.main.stream_reply", fake_stream_reply), \

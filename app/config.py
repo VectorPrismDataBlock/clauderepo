@@ -50,6 +50,41 @@ ENGINES = {
     },
 }
 
+# --- Cost estimation -------------------------------------------------------
+# VERIFY THESE NUMBERS before you trust the ticker. They are USD as published
+# when this file was last touched, they move, and the ticker only ever claims
+# to be an estimate. Everything else reads rates from here, so this table is
+# the single place to correct.
+PRICING_AS_OF = "2026-05"
+
+# Per 1M tokens, except `per_minute`, which is per minute of audio.
+PRICING = {
+    REALTIME_MODEL: {
+        "text_input": 4.00,
+        "cached_input": 0.40,
+        "audio_input": 32.00,
+        "text_output": 16.00,
+        "audio_output": 64.00,
+    },
+    INPUT_TRANSCRIPTION_MODEL: {"per_minute": 0.006},
+    PIPELINE_TRANSCRIPTION_MODEL: {"per_minute": 0.003},
+    PIPELINE_CHAT_MODEL: {
+        "text_input": 0.15,
+        "cached_input": 0.075,
+        "text_output": 0.60,
+    },
+}
+
+# --- Proficiency scoring ---------------------------------------------------
+# One small graded call per student answer, off the tutor's latency path. The
+# prompt carries the lesson *title* and the exchange, never the lesson body,
+# which is what keeps it to a fraction of a cent per turn.
+ASSESS_MODEL = PIPELINE_CHAT_MODEL
+ASSESS_MAX_TOKENS = 160
+
+# What each verdict is worth when the running proficiency is computed.
+VERDICT_SCORES = {"correct": 1.0, "partial": 0.5, "incorrect": 0.0}
+
 # Rough guard so a pasted page doesn't blow past the model's context.
 MAX_LESSON_CHARS = 20_000
 

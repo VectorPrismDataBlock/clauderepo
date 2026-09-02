@@ -49,11 +49,14 @@ body {
 
 .chat-panels {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
-  padding: 12px 14px 0;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--line);
+  max-height: 46%;
+  overflow-y: auto;
 }
+.mini-panel.wide { grid-column: 1 / -1; }
 .mini-panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -80,6 +83,74 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.mini-panel select { width: 100%; font-size: 12px; padding: 5px 8px; }
+.mini-panel h3 .tag {
+  float: right;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.panel-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.fine { color: var(--muted); font-size: 11px; margin-top: 6px; }
+
+/* --- proficiency gauge --- */
+.gauge {
+  height: 8px;
+  border-radius: 99px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.gauge-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 99px;
+  background: var(--live);
+  transition: width 0.4s ease, background 0.4s ease;
+}
+/* Red through amber to green as the student's answers land. */
+.gauge-fill.low { background: #ff8b7d; }
+.gauge-fill.mid { background: #e5c07b; }
+.gauge-label { margin-top: 7px !important; }
+.gauge-label .score { font-size: 15px; font-weight: 600; }
+
+/* --- cost ticker --- */
+.ticker { display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
+.ticker span { font-variant-numeric: tabular-nums; }
+#cost-session { font-size: 15px; font-weight: 600; }
+.ticker .secondary-figure { color: var(--muted); margin-left: 6px; }
+.ticker .unit {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* --- concept chips in the learner profile --- */
+.chip {
+  display: inline-block;
+  padding: 1px 7px;
+  margin-right: 4px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  font-size: 11px;
+}
+.chip.good { border-color: rgba(70, 209, 127, 0.5); color: var(--live); }
+.chip.weak { border-color: rgba(255, 139, 125, 0.5); color: #ff8b7d; }
+
+/* --- viewing an archived session --- */
+.transcript.archived { opacity: 0.75; }
+.archive-banner {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }

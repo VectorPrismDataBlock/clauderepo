@@ -1,8 +1,5 @@
 const SDP_URL = "https://api.openai.com/v1/realtime/calls";
 
-const STORAGE_KEY = "voice-tutor-profile";
-const HISTORY_KEY = "voice-tutor-session-history";
-
 // --- turn-based engine tuning ---------------------------------------------
 const SPEECH_RMS = 0.015;        // above this counts as speech
 const SILENCE_MS = 1100;         // trailing silence that ends a turn
@@ -56,7 +53,17 @@ const els = {
   lessonTitle: document.getElementById("lesson-title"),
   sessionSummary: document.getElementById("session-summary"),
   learnerProfile: document.getElementById("learner-profile"),
-  sessionHistory: document.getElementById("session-history"),
+  sessionPicker: document.getElementById("session-picker"),
+  deleteSession: document.getElementById("delete-session"),
+  forgetAll: document.getElementById("forget-all"),
+  exportBtn: document.getElementById("export"),
+  profFill: document.getElementById("prof-fill"),
+  profLabel: document.getElementById("prof-label"),
+  profCount: document.getElementById("prof-count"),
+  costSession: document.getElementById("cost-session"),
+  costTotal: document.getElementById("cost-total"),
+  costBreakdown: document.getElementById("cost-breakdown"),
+  costClear: document.getElementById("cost-clear"),
   audio: document.getElementById("tutor-audio"),
 };
 
@@ -72,6 +79,34 @@ let recorder = null;
 let stopVad = null;
 let recording = false;
 let paused = false;
+let recordStartedAt = 0;
+let speechStartedAt = 0;
+
+// Tutor speech arrives as deltas; bank them so a whole turn is recorded once,
+// and so the grader knows which question was just asked.
+let tutorItem = null;
+let tutorText = "";
+let lastTutorTurn = "";
+
+function noteTutorDelta(itemId, delta) {
+  if (tutorItem !== itemId) {
+    flushTutorTurn();
+    tutorItem = itemId;
+  }
+  tutorText += delta;
+}
+
+/** Commit the tutor's turn to the record and return the question just asked. */
+function flushTutorTurn() {
+  const text = tutorText.trim();
+  if (text) {
+    recordTurn("tutor", text);
+    lastTutorTurn = text;
+  }
+  tutorItem = null;
+  tutorText = "";
+  return lastTutorTurn;
+}
 
 function setStatus(text, isError = false) {
   els.status.textContent = text;
@@ -135,107 +170,540 @@ function appendTo(itemId, who, text) {
   els.transcript.scrollTop = els.transcript.scrollHeight;
 }
 
-function getStoredProfile() {
+// --- persistent store -----------------------------------------------------
+// Everything lives in localStorage: no auth, no database, no server-side
+// record of a student. The API key is never part of it.
+
+const STORE_KEY = "voice-tutor-store";
+const STORE_VERSION = 2;
+const PROF_ALPHA = 0.3;   // EWMA weight - recent answers move the gauge most
+const FALLBACK_SCORES = { correct: 1, partial: 0.5, incorrect: 0 };
+
+let store = loadStore();
+let live = null;          // the session in progress, or null between sessions
+let viewing = "live";     // which session the transcript pane is showing
+let prices = null;        // rate table from /api/pricing
+
+function emptyStore() {
+  return { version: STORE_VERSION, sessions: [] };
+}
+
+function emptyCost() {
+  return { total: 0, byKind: {}, calls: 0 };
+}
+
+function loadStore() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return {
-        strengths: ["Clear lesson structure", "Short explanations"],
-        weaknesses: ["Follow-up questions"],
-        lastSessionSummary: "No session summary yet.",
-      };
+    const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+    if (raw && raw.version === STORE_VERSION) return raw;
+  } catch { /* fall through and rebuild */ }
+
+  // Carry across whatever the pre-archive build left behind, so upgrading does
+  // not silently drop a student's history.
+  const migrated = emptyStore();
+  try {
+    const old = JSON.parse(localStorage.getItem("voice-tutor-session-history") || "[]");
+    for (const entry of old) {
+      migrated.sessions.push({
+        id: `legacy-${entry.timestamp || Math.random().toString(36).slice(2)}`,
+        title: entry.title || "Untitled lesson",
+        startedAt: entry.timestamp || null,
+        endedAt: entry.timestamp || null,
+        imported: true,
+        note: entry.summary || "",
+        turns: [],
+        assessments: [],
+        cost: emptyCost(),
+      });
     }
-    return JSON.parse(raw);
-  } catch {
-    return {
-      strengths: ["Clear lesson structure", "Short explanations"],
-      weaknesses: ["Follow-up questions"],
-      lastSessionSummary: "No session summary yet.",
-    };
-  }
+  } catch { /* nothing worth keeping */ }
+  return migrated;
 }
 
-function saveStoredProfile(profile) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
-}
-
-function getStoredHistory() {
+function saveStore() {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    return raw ? JSON.parse(raw) : [];
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
   } catch {
-    return [];
+    // Quota is the realistic failure here: transcripts add up.
+    setStatus("Could not save history (browser storage full). Export, then Forget all.", true);
   }
 }
 
-function saveStoredHistory(history) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 8)));
+function allSessions() {
+  return live ? [live, ...store.sessions] : store.sessions;
 }
 
-function formatMemory(profile) {
-  const strengths = (profile.strengths || []).slice(0, 3).join(", ") || "No major strengths recorded yet.";
-  const weaknesses = (profile.weaknesses || []).slice(0, 3).join(", ") || "No weak spots recorded yet.";
-  const summary = profile.lastSessionSummary || "No session summary yet.";
-  return `Strengths: ${strengths}. Weaknesses: ${weaknesses}. Recent session summary: ${summary}`;
+function sessionById(id) {
+  if (id === "live") return live;
+  return store.sessions.find((s) => s.id === id) || null;
 }
 
-function syncProfileUI() {
-  const profile = getStoredProfile();
-  const strengths = (profile.strengths || []).slice(0, 3);
-  const weaknesses = (profile.weaknesses || []).slice(0, 3);
+// --- session records ------------------------------------------------------
 
-  els.learnerProfile.innerHTML = "";
-  const items = [
-    ...strengths.map((item) => `<li><strong>Strength:</strong> ${item}</li>`),
-    ...weaknesses.map((item) => `<li><strong>Focus:</strong> ${item}</li>`),
+function beginLiveSession() {
+  live = {
+    id: `s-${Date.now().toString(36)}`,
+    title: els.lessonTitle.textContent || "Untitled lesson",
+    url: els.url.value.trim(),
+    engine: els.engine.value,
+    mode: els.mode.value,
+    language: els.language.value,
+    difficulty: els.difficulty.value,
+    pace: els.pace.value,
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    turns: [],
+    assessments: [],
+    cost: emptyCost(),
+  };
+  viewing = "live";
+  renderAll();
+}
+
+function endLiveSession() {
+  if (!live) return;
+  live.endedAt = new Date().toISOString();
+  live.title = els.lessonTitle.textContent || live.title;
+  live.proficiency = proficiencyOf(live);
+
+  // Only archive sessions where something actually happened.
+  if (live.turns.length) {
+    store.sessions.unshift(live);
+    saveStore();
+    // Keep looking at what just finished, so the score and cost stay on screen.
+    viewing = live.id;
+  }
+  live = null;
+  renderAll();
+}
+
+function recordTurn(role, text) {
+  if (!live || !text.trim()) return;
+  live.turns.push({ role, text: text.trim(), at: new Date().toISOString() });
+}
+
+// --- cost ticker ----------------------------------------------------------
+// Both engines report raw usage and all the arithmetic happens here, so there
+// is one implementation and one rate table to correct.
+
+function rateFor(model) {
+  return (prices && prices.rates && prices.rates[model]) || null;
+}
+
+/** Price one reported call. Returns null when the model has no rate on file. */
+function priceUsage(kind, model, detail) {
+  const rate = rateFor(model);
+  if (!rate) return null;
+
+  if (kind === "stt") {
+    const seconds = detail.seconds || 0;
+    return { usd: (seconds / 60) * (rate.per_minute || 0) };
+  }
+
+  const usage = detail.usage || {};
+
+  if (kind === "realtime") {
+    const input = usage.input_token_details || {};
+    const output = usage.output_token_details || {};
+    const cachedParts = input.cached_tokens_details || {};
+    // Older payloads report one cached total with no split; treat it as text.
+    const hasSplit = "text_tokens" in cachedParts || "audio_tokens" in cachedParts;
+    const cachedText = hasSplit ? (cachedParts.text_tokens || 0) : (input.cached_tokens || 0);
+    const cachedAudio = hasSplit ? (cachedParts.audio_tokens || 0) : 0;
+    const text = Math.max(0, (input.text_tokens || 0) - cachedText);
+    const audio = Math.max(0, (input.audio_tokens || 0) - cachedAudio);
+
+    const usd = (
+      text * (rate.text_input || 0) +
+      audio * (rate.audio_input || 0) +
+      (cachedText + cachedAudio) * (rate.cached_input || 0) +
+      (output.text_tokens || 0) * (rate.text_output || 0) +
+      (output.audio_tokens || 0) * (rate.audio_output || 0)
+    ) / 1e6;
+    return { usd };
+  }
+
+  // Chat-completions shape, used by both the tutor reply and the grader.
+  const details = usage.prompt_tokens_details || {};
+  const cached = details.cached_tokens || 0;
+  const fresh = Math.max(0, (usage.prompt_tokens || 0) - cached);
+  const out = usage.completion_tokens || 0;
+  const cachedRate = rate.cached_input === undefined ? (rate.text_input || 0) : rate.cached_input;
+
+  const usd = (
+    fresh * (rate.text_input || 0) +
+    cached * cachedRate +
+    out * (rate.text_output || 0)
+  ) / 1e6;
+  return { usd };
+}
+
+function recordUsage(kind, model, detail) {
+  const priced = priceUsage(kind, model, detail);
+  if (!priced || !live) return;
+
+  live.cost.total += priced.usd;
+  live.cost.byKind[kind] = (live.cost.byKind[kind] || 0) + priced.usd;
+  live.cost.calls += 1;
+  renderCost();
+}
+
+function money(usd) {
+  if (!usd) return "$0.0000";
+  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
+function allTimeCost() {
+  return allSessions().reduce((sum, s) => sum + ((s.cost && s.cost.total) || 0), 0);
+}
+
+function clearTicker() {
+  const shown = sessionById(viewing);
+  if (!shown) return;
+  shown.cost = emptyCost();
+  if (shown !== live) saveStore();
+  renderCost();
+  setStatus("Cost ticker cleared for this session.");
+}
+
+// --- proficiency ----------------------------------------------------------
+
+function verdictScore(verdict) {
+  const scores = (prices && prices.verdict_scores) || FALLBACK_SCORES;
+  // off_topic is deliberately absent: it scores nothing either way.
+  return verdict in scores ? scores[verdict] : null;
+}
+
+/** Exponentially weighted, so the gauge tracks where the student is now. */
+function proficiencyOf(session) {
+  const scores = ((session && session.assessments) || [])
+    .map((a) => verdictScore(a.verdict))
+    .filter((v) => v !== null);
+  if (!scores.length) return null;
+
+  let value = scores[0];
+  for (let i = 1; i < scores.length; i++) value += PROF_ALPHA * (scores[i] - value);
+  return value;
+}
+
+function proficiencyBand(value) {
+  if (value < 0.35) return { label: "Finding your feet", cls: "low" };
+  if (value < 0.6) return { label: "Building", cls: "mid" };
+  if (value < 0.8) return { label: "Solid", cls: "" };
+  return { label: "Strong", cls: "" };
+}
+
+async function gradeAnswer(question, answer) {
+  const api_key = els.apiKey.value.trim();
+  if (!api_key || !question || !live) return;
+
+  try {
+    const res = await fetch("/api/assess", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key,
+        question,
+        answer,
+        lesson_title: live.title,
+        language: els.language.value,
+      }),
+    });
+    if (!res.ok) return; // grading is best-effort and never interrupts the lesson
+    const data = await res.json();
+
+    live.assessments.push({ ...data.assessment, at: new Date().toISOString() });
+    recordUsage("assess", data.model, { usage: data.usage });
+    renderProficiency();
+    renderProfile();
+    renderSummary();
+  } catch { /* offline or key rejected - the tutor carries on regardless */ }
+}
+
+// --- learner profile ------------------------------------------------------
+
+/** Roll every graded answer up by concept, across all sessions. */
+function conceptTallies() {
+  const byConcept = new Map();
+
+  for (const session of allSessions()) {
+    for (const item of session.assessments || []) {
+      const score = verdictScore(item.verdict);
+      const name = (item.concept || "").trim();
+      if (score === null || !name) continue;
+
+      const key = name.toLowerCase();
+      const tally = byConcept.get(key) || { concept: name, attempts: 0, score: 0, note: "" };
+      tally.attempts += 1;
+      tally.score += score;
+      tally.note = item.note || tally.note;
+      tally.last = item.at;
+      byConcept.set(key, tally);
+    }
+  }
+
+  return [...byConcept.values()]
+    .map((t) => ({ ...t, ratio: t.score / t.attempts }))
+    .sort((a, b) => b.attempts - a.attempts);
+}
+
+function splitProfile() {
+  const tallies = conceptTallies();
+  return {
+    strong: tallies.filter((t) => t.attempts >= 2 && t.ratio >= 0.75),
+    weak: tallies.filter((t) => t.ratio <= 0.45),
+    seen: tallies,
+  };
+}
+
+/** The slice of the profile that goes into the tutor's system prompt. */
+function formatMemory() {
+  const { strong, weak } = splitProfile();
+  const name = (t) => `${t.concept} (${t.score}/${t.attempts})`;
+
+  const parts = [
+    strong.length
+      ? `Solid on: ${strong.slice(0, 5).map(name).join(", ")}.`
+      : "No confirmed strengths yet.",
+    weak.length
+      ? `Weak on: ${weak.slice(0, 5).map(name).join(", ")}.`
+      : "No confirmed weak spots yet.",
   ];
 
-  if (!items.length) {
-    items.push("<li>No memory recorded yet.</li>");
+  const last = store.sessions[0];
+  if (last) {
+    const score = last.proficiency == null
+      ? "ungraded"
+      : `${Math.round(last.proficiency * 100)}%`;
+    parts.push(`Last session on "${last.title}" ended at ${score} proficiency.`);
   }
-
-  els.learnerProfile.innerHTML = items.join("");
-  els.sessionSummary.textContent = profile.lastSessionSummary || "No session summary yet.";
-
-  const history = getStoredHistory();
-  els.sessionHistory.innerHTML = history.length
-    ? history.map((entry) => `<li>${entry.title}: ${entry.summary}</li>`).join("")
-    : "<li>No saved sessions.</li>";
+  return parts.join(" ");
 }
 
-function clearChat() {
-  els.transcript.innerHTML = "";
-  bubbles.clear();
-  const profile = getStoredProfile();
-  profile.lastSessionSummary = "Transcript cleared. Start a fresh learning loop.";
-  saveStoredProfile(profile);
-  syncProfileUI();
-}
+// --- rendering ------------------------------------------------------------
 
-function updateSessionSummary() {
-  const transcript = els.transcript.textContent || "";
-  if (!transcript.trim()) {
-    els.sessionSummary.textContent = "No session yet.";
+function renderProficiency() {
+  const session = sessionById(viewing);
+  const stored = session && session.proficiency;
+  const value = stored == null ? proficiencyOf(session) : stored;
+  const graded = ((session && session.assessments) || []).length;
+
+  els.profCount.textContent = graded ? `${graded} graded` : "";
+
+  if (value == null) {
+    els.profFill.style.width = "0%";
+    els.profFill.className = "gauge-fill";
+    els.profLabel.textContent = session
+      ? "Answer a question to start scoring."
+      : "Not assessed yet.";
     return;
   }
 
-  const tutorTurns = els.transcript.querySelectorAll(".turn.tutor").length;
-  const studentTurns = els.transcript.querySelectorAll(".turn.student").length;
-  const questionCount = (transcript.match(/\?/g) || []).length;
-  const status = questionCount > 0 ? "Needs follow-up questions" : "Steady progress";
-  const summary = `${tutorTurns} tutor turns • ${studentTurns} student turns • ${questionCount} questions • ${status}`;
+  const band = proficiencyBand(value);
+  els.profFill.style.width = `${Math.round(value * 100)}%`;
+  els.profFill.className = `gauge-fill ${band.cls}`;
+  els.profLabel.innerHTML =
+    `<span class="score">${Math.round(value * 100)}%</span> · ${band.label}`;
+}
 
-  const profile = getStoredProfile();
-  profile.lastSessionSummary = summary;
-  if (questionCount > 0) {
-    profile.weaknesses = Array.from(new Set([...(profile.weaknesses || []), "Follow-up questions"]))
-      .slice(0, 4);
+function renderCost() {
+  const session = sessionById(viewing);
+  const cost = (session && session.cost) || emptyCost();
+  els.costSession.textContent = money(cost.total);
+  els.costTotal.textContent = money(allTimeCost());
+
+  const parts = Object.entries(cost.byKind)
+    .filter(([, usd]) => usd > 0)
+    .map(([kind, usd]) => `${kind} ${money(usd)}`);
+
+  if (!prices) els.costBreakdown.textContent = "Rates not loaded.";
+  else if (!parts.length) els.costBreakdown.textContent = `No spend yet · rates as of ${prices.as_of}`;
+  else els.costBreakdown.textContent = `${parts.join(" · ")} over ${cost.calls} calls`;
+}
+
+function renderProfile() {
+  const { strong, weak, seen } = splitProfile();
+  const chip = (t, cls) => `<span class="chip ${cls}">${t.concept} ${t.score}/${t.attempts}</span>`;
+
+  const rows = [];
+  if (strong.length) rows.push(`<li>${strong.slice(0, 6).map((t) => chip(t, "good")).join("")}</li>`);
+  if (weak.length) rows.push(`<li>${weak.slice(0, 6).map((t) => chip(t, "weak")).join("")}</li>`);
+  if (!rows.length) {
+    rows.push(seen.length
+      ? `<li>${seen.slice(0, 6).map((t) => chip(t, "")).join("")}</li>`
+      : "<li>No graded answers yet - the profile fills in as you talk.</li>");
   }
-  if (tutorTurns > studentTurns) {
-    profile.strengths = Array.from(new Set([...(profile.strengths || []), "Concept review"])).slice(0, 4);
+
+  const note = (weak[0] && weak[0].note) || (strong[0] && strong[0].note);
+  if (note) rows.push(`<li class="fine">${note}</li>`);
+
+  els.learnerProfile.innerHTML = rows.join("");
+}
+
+function renderSessions() {
+  const liveLabel = live ? "Live session" : "Live session (not started)";
+  const options = [
+    `<option value="live"${viewing === "live" ? " selected" : ""}>${liveLabel}</option>`,
+    ...store.sessions.map((s) => {
+      const when = s.startedAt ? new Date(s.startedAt).toLocaleString() : "unknown date";
+      const score = s.proficiency == null ? "" : ` · ${Math.round(s.proficiency * 100)}%`;
+      const selected = viewing === s.id ? " selected" : "";
+      return `<option value="${s.id}"${selected}>${s.title} — ${when}${score}</option>`;
+    }),
+  ];
+  els.sessionPicker.innerHTML = options.join("");
+  els.deleteSession.disabled = viewing === "live";
+}
+
+function renderSummary() {
+  const session = sessionById(viewing);
+  if (!session) {
+    els.sessionSummary.textContent = "No session yet.";
+    return;
   }
-  saveStoredProfile(profile);
-  syncProfileUI();
+  if (session.imported) {
+    els.sessionSummary.textContent = session.note || "Imported from an earlier version.";
+    return;
+  }
+
+  const tutor = session.turns.filter((t) => t.role === "tutor").length;
+  const student = session.turns.filter((t) => t.role === "student").length;
+  const graded = session.assessments.length;
+  const missed = session.assessments.filter((a) => a.verdict === "incorrect").length;
+
+  const bits = [`${tutor} tutor / ${student} student turns`];
+  if (graded) bits.push(`${graded} graded, ${missed} missed`);
+  bits.push(money((session.cost && session.cost.total) || 0));
+  if (session.engine) bits.push(session.engine);
+
+  els.sessionSummary.textContent = bits.join(" · ");
+}
+
+/** Show whichever session the picker points at. */
+function renderTranscript() {
+  if (viewing === "live") {
+    els.transcript.classList.remove("archived");
+    return; // the live transcript is built up by appendTo as it happens
+  }
+
+  const session = sessionById(viewing);
+  els.transcript.classList.add("archived");
+  els.transcript.innerHTML = "";
+  bubbles.clear();
+
+  if (!session || !session.turns.length) {
+    const why = (session && session.note) || "No transcript saved for this session.";
+    els.transcript.innerHTML = `<p class="archive-banner">${why}</p>`;
+    return;
+  }
+
+  const when = session.startedAt ? new Date(session.startedAt).toLocaleString() : "";
+  els.transcript.innerHTML =
+    `<p class="archive-banner">Archived · ${session.title} · ${when}</p>`;
+  for (const turn of session.turns) {
+    appendTo(`${session.id}-${turn.at}-${turn.role}`, turn.role, turn.text);
+  }
+}
+
+function renderAll() {
+  renderSessions();
+  renderTranscript();
+  renderProficiency();
+  renderCost();
+  renderProfile();
+  renderSummary();
+}
+
+// Kept under the old name: handleEvent calls it after every turn.
+function updateSessionSummary() {
+  renderSummary();
+  renderProficiency();
+}
+
+function syncProfileUI() {
+  renderAll();
+}
+
+// --- archive controls -----------------------------------------------------
+
+function pickSession() {
+  viewing = els.sessionPicker.value;
+  renderAll();
+  if (viewing !== "live") setStatus("Viewing an archived session. Pick Live session to go back.");
+}
+
+function deleteViewedSession() {
+  const session = sessionById(viewing);
+  if (viewing === "live" || !session) return;
+  if (!confirm(`Delete the saved session "${session.title}"? This cannot be undone.`)) return;
+
+  store.sessions = store.sessions.filter((s) => s.id !== viewing);
+  saveStore();
+  viewing = "live";
+  renderAll();
+  setStatus("Session deleted.");
+}
+
+function forgetAll() {
+  if (!store.sessions.length) return setStatus("Nothing saved to forget.");
+  const message = `Delete all ${store.sessions.length} saved sessions and the learner profile?`
+    + " Export first if you want a copy.";
+  if (!confirm(message)) return;
+
+  store = emptyStore();
+  saveStore();
+  viewing = "live";
+  renderAll();
+  setStatus("All saved history deleted.");
+}
+
+function clearChat() {
+  // View only. The session record and everything derived from it survive, and
+  // the picker brings any of it back.
+  els.transcript.innerHTML = "";
+  bubbles.clear();
+  setStatus(viewing === "live" && live
+    ? "Transcript cleared from view - the session is still being recorded."
+    : "Transcript cleared from view.");
+}
+
+// --- export ---------------------------------------------------------------
+
+function exportJSON() {
+  const payload = {
+    schema: "voice-tutor/2",
+    exportedAt: new Date().toISOString(),
+    // Rates travel with the data so a cost figure stays interpretable later.
+    pricing: prices ? { as_of: prices.as_of, rates: prices.rates } : null,
+    totals: {
+      sessions: allSessions().length,
+      estimatedCostUsd: Number(allTimeCost().toFixed(6)),
+      gradedAnswers: allSessions().reduce((n, s) => n + (s.assessments || []).length, 0),
+    },
+    profile: { concepts: conceptTallies() },
+    sessions: allSessions(),
+  };
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `voice-tutor-${stamp}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+
+  setStatus(`Exported ${payload.totals.sessions} session(s) as JSON.`);
+}
+
+async function loadPricing() {
+  try {
+    prices = await (await fetch("/api/pricing")).json();
+  } catch {
+    prices = null; // the ticker says so rather than inventing a number
+  }
+  renderCost();
 }
 
 function handleEvent(event) {
@@ -243,30 +711,56 @@ function handleEvent(event) {
     // Server VAD heard the student start/stop talking — this is the visible
     // half of "active listening".
     case "input_audio_buffer.speech_started":
+      speechStartedAt = Date.now();
       setListening(true, "Hearing you…");
       break;
     case "input_audio_buffer.speech_stopped":
+      // Realtime bills input transcription per minute, and only the browser
+      // knows how long the student actually spoke.
+      if (speechStartedAt) {
+        recordUsage("stt", prices?.models?.realtime_stt, {
+          seconds: (Date.now() - speechStartedAt) / 1000,
+        });
+        speechStartedAt = 0;
+      }
       setListening(false, "Listening");
       break;
 
-    case "conversation.item.input_audio_transcription.completed":
-      appendTo(`student-${event.item_id}`, "student", event.transcript || "");
+    case "conversation.item.input_audio_transcription.completed": {
+      const said = event.transcript || "";
+      appendTo(`student-${event.item_id}`, "student", said);
+      const question = flushTutorTurn();
+      recordTurn("student", said);
+      gradeAnswer(question, said); // deliberately not awaited
       updateSessionSummary();
       break;
+    }
 
     // GA event name, plus the older alias, so this keeps working either way.
     case "response.output_audio_transcript.delta":
     case "response.audio_transcript.delta":
       appendTo(`tutor-${event.item_id}`, "tutor", event.delta || "");
+      noteTutorDelta(event.item_id, event.delta || "");
       // Realtime sends real audio alongside this. The turn-based engine sends
       // text only, so the browser speaks it as the sentences land.
       if (engine === "pipeline") queueSpeech(event.delta || "");
       updateSessionSummary();
       break;
 
+    // Turn-based engine reports raw usage per call; the ticker prices it.
+    case "usage":
+      recordUsage(event.kind, event.model, event);
+      break;
+
     // Turn-based engine: the reply is complete, so hand the floor back once
     // the synthesiser has finished saying it.
     case "response.done":
+      // Realtime attaches token usage here -- the only place the browser can
+      // see what a turn cost.
+      if (event.response?.usage) {
+        recordUsage("realtime", prices?.models?.realtime, { usage: event.response.usage });
+      }
+      flushTutorTurn();
       if (engine === "pipeline") endTutorTurn();
       break;
 
@@ -309,7 +803,7 @@ async function start() {
         listening_mode: els.listeningMode.value,
         difficulty: els.difficulty.value,
         pace: els.pace.value,
-        memory: formatMemory(getStoredProfile()),
+        memory: formatMemory(),
       }),
     });
     const data = await res.json();
@@ -318,6 +812,7 @@ async function start() {
     // Show the page alongside the session if Load wasn't pressed first.
     if (!els.reader.textContent) await loadLesson();
 
+    beginLiveSession();
     setStatus("Connecting audio…");
     if (engine === "pipeline") await connectPipeline(data.ws);
     else await connect(data.client_secret);
@@ -330,6 +825,7 @@ async function start() {
   } catch (err) {
     setStatus(err.message, true);
     els.start.disabled = false;
+    endLiveSession(); // discards it -- nothing was said
     await teardown();
   }
 }
@@ -542,10 +1038,16 @@ function startRecording() {
     setListening(false, "Thinking…");
     setStatus("Transcribing…");
     const blob = new Blob(chunks, { type: mime });
-    ws.send(JSON.stringify({ type: "utterance", mime, data: await toBase64(blob) }));
+    ws.send(JSON.stringify({
+      type: "utterance",
+      mime,
+      seconds: (Date.now() - recordStartedAt) / 1000,
+      data: await toBase64(blob),
+    }));
   });
 
   recorder.start();
+  recordStartedAt = Date.now();
   recording = true;
   els.listen.disabled = false;
   els.listen.textContent = "Send";
@@ -645,21 +1147,8 @@ async function teardown() {
 }
 
 async function stop() {
-  updateSessionSummary();
-
-  const history = getStoredHistory();
-  const summary = els.sessionSummary.textContent || "No summary yet.";
-  const title = els.lessonTitle.textContent && els.lessonTitle.textContent !== "No lesson loaded"
-    ? els.lessonTitle.textContent
-    : "Untitled lesson";
-
-  history.unshift({
-    title,
-    summary,
-    timestamp: new Date().toISOString(),
-  });
-  saveStoredHistory(history);
-  syncProfileUI();
+  flushTutorTurn();
+  endLiveSession();
 
   await teardown();
   hasSessionStarted = false;
@@ -730,6 +1219,11 @@ els.readerToggle.addEventListener("click", () =>
   showReader(!els.reader.classList.contains("visible")));
 els.url.addEventListener("keydown", (e) => { if (e.key === "Enter") loadLesson(); });
 els.engine.addEventListener("change", describeEngine);
+els.sessionPicker.addEventListener("change", pickSession);
+els.deleteSession.addEventListener("click", deleteViewedSession);
+els.forgetAll.addEventListener("click", forgetAll);
+els.exportBtn.addEventListener("click", exportJSON);
+els.costClear.addEventListener("click", clearTicker);
 els.listeningMode.addEventListener("change", () => {
   const manual = els.listeningMode.value === "manual";
 
@@ -751,3 +1245,4 @@ els.listeningMode.addEventListener("change", () => {
 syncProfileUI();
 loadModes();
 loadEngines();
+loadPricing();

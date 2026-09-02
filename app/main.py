@@ -6,7 +6,19 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config import ENGINES, PIPELINE_CHAT_MODEL, REALTIME_MODEL, STATIC_DIR
+from .assess import AssessError, assess
+from .config import (
+    ASSESS_MODEL,
+    ENGINES,
+    INPUT_TRANSCRIPTION_MODEL,
+    PIPELINE_CHAT_MODEL,
+    PIPELINE_TRANSCRIPTION_MODEL,
+    PRICING,
+    PRICING_AS_OF,
+    REALTIME_MODEL,
+    STATIC_DIR,
+    VERDICT_SCORES,
+)
 from .lesson import LessonError, fetch_lesson, inject_base_href
 from .pipeline import PipelineError, stream_reply, transcribe
 from .prompts import MODES, build_instructions
@@ -28,6 +40,14 @@ class SessionRequest(BaseModel):
     memory: str = ""
 
 
+class AssessRequest(BaseModel):
+    api_key: str
+    question: str
+    answer: str
+    lesson_title: str = ""
+    language: str = "English"
+
+
 @app.get("/api/modes")
 def list_modes():
     return [{"id": key, "label": value["label"]} for key, value in MODES.items()]
@@ -39,6 +59,42 @@ def list_engines():
         {"id": key, "label": value["label"], "description": value["description"]}
         for key, value in ENGINES.items()
     ]
+
+
+@app.get("/api/pricing")
+def pricing():
+    """Rates for the cost ticker. The browser does the arithmetic so both
+    engines are priced by one implementation."""
+    return {
+        "as_of": PRICING_AS_OF,
+        "rates": PRICING,
+        "models": {
+            "realtime": REALTIME_MODEL,
+            "realtime_stt": INPUT_TRANSCRIPTION_MODEL,
+            "pipeline_chat": PIPELINE_CHAT_MODEL,
+            "pipeline_stt": PIPELINE_TRANSCRIPTION_MODEL,
+            "assess": ASSESS_MODEL,
+        },
+        "verdict_scores": VERDICT_SCORES,
+    }
+
+
+@app.post("/api/assess")
+async def assess_answer(req: AssessRequest):
+    """Grade one exchange. Called after the reply is already playing, so this
+    never sits in front of the student."""
+    try:
+        assessment, usage = await assess(
+            req.api_key.strip(),
+            req.lesson_title,
+            req.question,
+            req.answer,
+            req.language,
+        )
+    except AssessError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+
+    return {"assessment": assessment, "usage": usage, "model": ASSESS_MODEL}
 
 
 @app.get("/api/lesson")
@@ -119,15 +175,28 @@ async def create_session(req: SessionRequest):
 # not know which one is connected.
 
 
+async def _report_usage(websocket: WebSocket, kind: str, model: str, **detail) -> None:
+    """Raw usage only. The browser prices it, so Realtime and pipeline spend
+    land in the same ticker through the same code."""
+    await websocket.send_json({"type": "usage", "kind": kind, "model": model, **detail})
+
+
 async def _speak(websocket: WebSocket, session: TutorSession) -> None:
     """Stream one tutor turn to the browser as transcript deltas."""
     item_id = uuid.uuid4().hex
     reply: list[str] = []
 
-    async for delta in stream_reply(session.api_key, session.messages()):
-        reply.append(delta)
+    async for event in stream_reply(session.api_key, session.messages()):
+        if "usage" in event:
+            await _report_usage(websocket, "chat", PIPELINE_CHAT_MODEL, usage=event["usage"])
+            continue
+        reply.append(event["delta"])
         await websocket.send_json(
-            {"type": "response.output_audio_transcript.delta", "item_id": item_id, "delta": delta}
+            {
+                "type": "response.output_audio_transcript.delta",
+                "item_id": item_id,
+                "delta": event["delta"],
+            }
         )
 
     session.add("assistant", "".join(reply))
@@ -165,6 +234,14 @@ async def pipeline_ws(websocket: WebSocket, session_id: str):
                 continue
 
             said = await transcribe(session.api_key, audio, message.get("mime") or "audio/webm")
+            # Transcription is billed per minute of audio, and the browser is
+            # the only side that knows how long the clip was.
+            await _report_usage(
+                websocket,
+                "stt",
+                PIPELINE_TRANSCRIPTION_MODEL,
+                seconds=float(message.get("seconds") or 0),
+            )
             if not said:
                 # Silence or background noise. Costs one cheap STT call and
                 # saves a pointless completion.

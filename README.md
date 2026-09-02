@@ -42,17 +42,19 @@ memory, so a second worker will not recognise a session.
 
 ```
 app/
-  main.py       routes: /api/modes, /api/engines, /api/lesson, /api/lesson/proxy,
-                /api/session, and the turn-based socket /api/pipeline/ws/{id}
+  main.py       routes: /api/modes, /api/engines, /api/pricing, /api/assess,
+                /api/lesson, /api/lesson/proxy, /api/session, and the
+                turn-based socket /api/pipeline/ws/{id}
   prompts.py    the four learning-mode prompts + instruction builder
   lesson.py     URL fetch + HTML -> plain text (stdlib HTMLParser, no deps)
   realtime.py   exchanges the user's API key for an ephemeral client secret
   pipeline.py   transcription + streaming text completion for the cheap engine
   session.py    server-held conversation state for the cheap engine
-  config.py     models, voice, VAD, engine, fetch and size constants
+  assess.py     grades one answer, for the proficiency gauge
+  config.py     models, voice, VAD, engine, PRICING, scoring constants
 static/
   index.html    three-pane UI
-  app.js        both engines, transcript rendering, browser speech synthesis
+  app.js        both engines, transcript, speech synthesis, cost, scoring, archive
   style.css
 ```
 
@@ -116,6 +118,89 @@ Swap models in `app/config.py` (`PIPELINE_TRANSCRIPTION_MODEL`,
 Listening `auto` / `manual` works in both: `auto` ends your turn for you,
 `manual` waits for the button.
 
+## Tracking a student
+
+Four panels sit above the transcript. Everything they show is derived from real
+API usage and real graded answers -- nothing is inferred from turn counts.
+
+### Cost ticker
+
+Both engines report raw usage and the browser prices all of it through one
+table, so Realtime and pipeline spend land in the same figure.
+
+- The pipeline socket forwards the `usage` block from each completion (including
+  how many prompt tokens were served from cache) and the measured length of each
+  audio clip.
+- Realtime attaches token usage to `response.done` on the data channel; the
+  browser times `speech_started` -> `speech_stopped` to price input
+  transcription, which is billed per minute and reported nowhere else.
+
+**The rate table in `app/config.py` is the one thing you must check.** It is
+labelled `PRICING_AS_OF` and the panel says "estimate" for a reason: published
+rates move, and a stale table produces a confident wrong number. Correct
+`PRICING` and everything downstream follows. A model with no rate on file
+contributes nothing rather than silently costing zero.
+
+**Clear ticker** resets the figure for the session you are looking at. The
+all-time figure beside it is the sum across everything still in the archive.
+
+### Proficiency gauge
+
+After every student answer, `POST /api/assess` grades that one exchange with a
+small model and strict JSON output, returning a concept, a verdict
+(`correct` / `partial` / `incorrect` / `off_topic`) and a one-clause note.
+
+Two decisions worth knowing:
+
+- **It runs off the latency path.** The call fires after the tutor's reply is
+  already playing, and it is never awaited. If it fails, the lesson carries on
+  ungraded.
+- **The prompt carries the lesson title, never the lesson body.** That is what
+  keeps a graded turn to a fraction of a cent, and it is why grading works the
+  same on both engines -- the Realtime model speaks every token it produces, so
+  it could not emit a hidden score even if asked to.
+
+The gauge is an exponentially weighted average (`PROF_ALPHA`, 0.3), so it tracks
+where the student is *now* rather than averaging away a recovery. `off_topic`
+scores nothing either way.
+
+### Learner profile
+
+Graded answers roll up by concept across every stored session, as
+`attempts` / `score` chips: green where the student is reliable (2+ attempts at
+75%+), red where they are not (45% or below). The same roll-up is what gets
+written into the tutor's system prompt as `LEARNER MEMORY`, so the tutor adapts
+on named concepts with real hit rates instead of a vague summary.
+
+### Sessions
+
+Every session is stored whole: turns, assessments, cost, settings. The picker
+reloads any of them into the transcript pane read-only.
+
+- **Clear chat** only clears the view. The recording continues and the picker
+  brings it straight back.
+- **Delete** drops the session being viewed; **Forget all** wipes the archive
+  and the profile with it. Both ask first.
+- **Export JSON** writes the lot -- every session, transcript, assessment and
+  cost, plus the rate table that produced those costs so the figures stay
+  interpretable later. It never contains the API key.
+
+```jsonc
+{
+  "schema": "voice-tutor/2",
+  "exportedAt": "...",
+  "pricing": { "as_of": "...", "rates": { } },
+  "totals": { "sessions": 3, "estimatedCostUsd": 0.0412, "gradedAnswers": 21 },
+  "profile": { "concepts": [{ "concept": "photosynthesis", "attempts": 4,
+                              "score": 3.5, "ratio": 0.875, "note": "..." }] },
+  "sessions": [{ "id": "...", "title": "...", "engine": "pipeline",
+                 "turns": [], "assessments": [], "cost": { } }]
+}
+```
+
+Storage is `localStorage` under one key, `voice-tutor-store`. No auth, no
+database, no server-side record of a student -- and therefore per-browser only.
+
 ## Learning modes
 
 | Mode | What the tutor does |
@@ -152,7 +237,15 @@ that file via `/api/modes`.
   User-Agent.
 - "Clear chat" clears the visible transcript only; the model still has the
   earlier turns in its context. End and restart the session to reset that.
-- No session persistence, auth, rate limiting, or transcript export.
+- History is per-browser `localStorage`. Clearing site data loses it, it does
+  not follow a student to another machine, and a long archive can hit the
+  storage quota (the status line says so; export and Forget all).
+- **The `PRICING` table is unverified.** It is a starting point, not a source of
+  truth -- check it against the current pricing page before quoting any figure
+  the ticker shows.
+- Grading is one small model's opinion of one exchange, with no view of the
+  lesson text. It is good enough to steer a gauge, not to grade a course.
+- No auth or rate limiting.
 - `MAX_LESSON_CHARS` (20k) truncates long lessons rather than chunking them.
 - If `POST /api/session` returns a 400 about unknown parameters, the Realtime
   session schema has moved — check `audio.input.transcription` and
@@ -161,5 +254,9 @@ that file via `/api/modes`.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover -s tests   # backend
+node tests/frontend_math.test.js       # cost + gauge arithmetic
 ```
+
+The second one matters: the ticker and the gauge are the two places where a
+wrong number still looks completely plausible on screen.
