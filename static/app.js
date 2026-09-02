@@ -69,6 +69,10 @@ const els = {
   costLabel: document.getElementById("cost-label"),
   costSpark: document.getElementById("cost-spark"),
   costAsof: document.getElementById("cost-asof"),
+  voiceMode: document.getElementById("voice-mode"),
+  browserVoice: document.getElementById("browser-voice"),
+  openaiVoice: document.getElementById("openai-voice"),
+  testVoice: document.getElementById("test-voice"),
   drawerSummary: document.getElementById("drawer-summary"),
   costBreakdown: document.getElementById("cost-breakdown"),
   costClear: document.getElementById("cost-clear"),
@@ -90,6 +94,9 @@ let recording = false;
 let paused = false;
 let recordStartedAt = 0;
 let speechStartedAt = 0;
+let voiceMode = "browser";
+let clips = [];
+let playQueue = Promise.resolve();
 
 // Tutor speech arrives as deltas; bank them so a whole turn is recorded once,
 // and so the grader knows which question was just asked.
@@ -306,7 +313,8 @@ function priceUsage(kind, model, detail) {
   const rate = rateFor(model);
   if (!rate) return null;
 
-  if (kind === "stt") {
+  // Speech-to-text and text-to-speech are both billed by the clock.
+  if (kind === "stt" || kind === "tts") {
     const reported = detail.usage || {};
     // Prefer what the API billed us for. Audio token counts are the real
     // quantity; our own clip timing is an educated guess about it.
@@ -962,6 +970,19 @@ function handleEvent(event) {
       recordUsage(event.kind, event.model, event);
       break;
 
+    // A synthesised sentence, ready to play.
+    case "audio.delta":
+      playClip(event.mime, event.data);
+      break;
+
+    // TTS failed mid-turn. Rather than leave the student in silence, drop to
+    // the browser voice and say whatever text has arrived since.
+    case "speech.failed":
+      voiceMode = "browser";
+      setStatus(`Neural voice unavailable (${event.message}) — using the browser voice.`, true);
+      flushSpeech(false);
+      break;
+
     // Turn-based engine: the reply is complete, so hand the floor back once
     // the synthesiser has finished saying it.
     case "response.done":
@@ -997,6 +1018,8 @@ async function start() {
 
   els.start.disabled = true;
   engine = els.engine.value || "realtime";
+  // Realtime speaks for itself; the neural-voice option is pipeline-only.
+  voiceMode = engine === "pipeline" ? els.voiceMode.value : "browser";
   paused = false;
   setStatus("Creating session…");
 
@@ -1008,6 +1031,8 @@ async function start() {
         api_key,
         lesson_url,
         engine,
+        voice_mode: els.voiceMode.value,
+        voice: els.openaiVoice.value,
         language: els.language.value,
         mode: els.mode.value,
         listening_mode: els.listeningMode.value,
@@ -1132,10 +1157,110 @@ function voiceLang() {
   return VOICE_LANGS[(els.language.value || "").trim().toLowerCase()] || "en-US";
 }
 
+// --- choosing a browser voice ---------------------------------------------
+// getVoices() returns whatever the OS has, worst-first on Windows: the old
+// SAPI "Microsoft David/Zira Desktop" voices sort ahead of the good ones.
+// Taking the first match by language is why the tutor sounded robotic.
+
+// Ranked by how they actually sound, best first. Substring match, case
+// insensitive, on the voice name.
+const VOICE_PREFERENCE = [
+  "google",     // Chrome's network voices - the big free win
+  "natural",    // Windows 11 "Microsoft Aria Natural" and friends
+  "neural",
+  "premium",    // macOS/iOS premium downloads
+  "enhanced",
+  "siri",
+];
+
+// Old SAPI5 voices. Usable, but only if there is nothing else.
+const VOICE_AVOID = ["desktop", "espeak", "sapi"];
+
+function voiceScore(voice) {
+  const name = (voice.name || "").toLowerCase();
+  const preferred = VOICE_PREFERENCE.findIndex((hint) => name.includes(hint));
+  let score = preferred === -1 ? 0 : (VOICE_PREFERENCE.length - preferred) * 10;
+  if (VOICE_AVOID.some((hint) => name.includes(hint))) score -= 25;
+  // Network voices are almost always the better ones where both exist.
+  if (voice.localService === false) score += 5;
+  return score;
+}
+
+/** Every installed voice for the session language, best first. */
+function voicesFor(lang) {
+  const all = window.speechSynthesis?.getVoices?.() || [];
+  const want = lang.toLowerCase();
+  const base = want.split("-")[0];
+  const tag = (v) => (v.lang || "").replace("_", "-").toLowerCase();
+
+  return all
+    .filter((v) => tag(v).startsWith(base))
+    // Exact locale first, then quality. en-GB should not win a request for
+    // en-US just because it happens to be a good voice.
+    .sort((a, b) =>
+      (tag(b) === want) - (tag(a) === want) || voiceScore(b) - voiceScore(a));
+}
+
 function pickVoice(lang) {
-  const voices = window.speechSynthesis?.getVoices?.() || [];
-  const base = lang.split("-")[0];
-  return voices.find((v) => v.lang === lang) || voices.find((v) => v.lang?.startsWith(base));
+  const chosen = els.browserVoice.value;
+  const ranked = voicesFor(lang);
+  return ranked.find((v) => v.name === chosen) || ranked[0];
+}
+
+/** Fill the voice dropdown for the current language, keeping any manual pick. */
+function loadBrowserVoices() {
+  const previous = els.browserVoice.value;
+  const ranked = voicesFor(voiceLang());
+
+  if (!ranked.length) {
+    els.browserVoice.innerHTML = '<option value="">No voices installed</option>';
+    return;
+  }
+
+  els.browserVoice.innerHTML = ranked
+    .map((v) => {
+      const tag = v.localService === false ? " · online" : "";
+      return `<option value="${v.name}">${v.name}${tag}</option>`;
+    })
+    .join("");
+
+  // Keep an explicit choice; otherwise take the best-ranked one.
+  if (previous && ranked.some((v) => v.name === previous)) els.browserVoice.value = previous;
+}
+
+function testVoice() {
+  if (els.voiceMode.value === "openai") {
+    return setStatus("The OpenAI voice is heard once a session starts.");
+  }
+  if (!window.speechSynthesis) return setStatus("This browser has no speech synthesis.", true);
+
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(
+    "Here is how I will sound. Shall we start the lesson?");
+  utterance.lang = voiceLang();
+  const voice = pickVoice(utterance.lang);
+  if (voice) utterance.voice = voice;
+  window.speechSynthesis.speak(utterance);
+  setStatus(voice ? `Testing ${voice.name}.` : "Testing the default voice.");
+}
+
+async function loadVoiceModes() {
+  try {
+    const data = await (await fetch("/api/voices")).json();
+    els.voiceMode.innerHTML = data.modes
+      .map((m) => `<option value="${m.id}">${m.label}</option>`).join("");
+    els.openaiVoice.innerHTML = data.openai_voices
+      .map((v) => `<option value="${v}">${v}</option>`).join("");
+    els.openaiVoice.value = data.default_voice;
+  } catch { /* the defaults in the markup stand */ }
+  syncVoiceControls();
+}
+
+/** Only one of the two voice pickers is ever relevant. */
+function syncVoiceControls() {
+  const useOpenai = els.voiceMode.value === "openai";
+  els.browserVoice.classList.toggle("hidden", useOpenai);
+  els.openaiVoice.classList.toggle("hidden", !useOpenai);
 }
 
 // Index of the first real sentence end, or -1. Skips the dot in "3.5", and
@@ -1194,10 +1319,18 @@ function queueSpeech(delta) {
     setStatus("Tutor is answering…");
   }
   speech.buffer += delta;
-  flushSpeech(false);
+  // With the neural voice on, audio arrives from the server instead. The text
+  // is still banked so a mid-turn TTS failure can be spoken by the browser.
+  if (voiceMode !== "openai") flushSpeech(false);
 }
 
 function endTutorTurn() {
+  if (voiceMode === "openai") {
+    speech.buffer = "";
+    speech.turnEnded = true;
+    if (!speech.pending) openFloor();
+    return;
+  }
   flushSpeech(true);
   speech.turnEnded = true;
   // No synthesiser (or nothing left to say) means nothing will call us back.
@@ -1279,8 +1412,48 @@ function finishRecording(send) {
   try { recorder.stop(); } catch { /* already stopping */ }
 }
 
+/** Play one synthesised sentence, in order, and bill for what it played. */
+function playClip(mime, base64) {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  const audio = new Audio(url);
+  clips.push(audio);
+  speech.pending += 1;
+
+  const done = () => {
+    URL.revokeObjectURL(url);
+    clips = clips.filter((c) => c !== audio);
+    speech.pending = Math.max(0, speech.pending - 1);
+    if (!speech.pending && speech.turnEnded) openFloor();
+  };
+
+  audio.addEventListener("loadedmetadata", () => {
+    // The speech endpoint reports no usage, so the duration we actually
+    // played is the honest quantity to price.
+    if (Number.isFinite(audio.duration)) {
+      recordUsage("tts", prices?.models?.speech, { seconds: audio.duration });
+    }
+  });
+  audio.addEventListener("ended", done);
+  audio.addEventListener("error", done);
+
+  // Strictly in order: queue behind whatever is still playing.
+  playQueue = playQueue.then(() => new Promise((resolve) => {
+    audio.addEventListener("ended", resolve, { once: true });
+    audio.addEventListener("error", resolve, { once: true });
+    audio.play().catch(resolve);
+  }));
+}
+
+function stopClips() {
+  for (const audio of clips) { audio.pause(); audio.src = ""; }
+  clips = [];
+  playQueue = Promise.resolve();
+}
+
 function abandonTurn() {
   window.speechSynthesis?.cancel();
+  stopClips();
   speech.buffer = "";
   speech.pending = 0;
   speech.turnEnded = false;
@@ -1451,6 +1624,14 @@ els.readerToggle.addEventListener("click", () =>
   showReader(!els.reader.classList.contains("visible")));
 els.url.addEventListener("keydown", (e) => { if (e.key === "Enter") loadLesson(); });
 els.engine.addEventListener("change", () => { describeEngine(); restoreBudget(); renderCost(); });
+els.voiceMode.addEventListener("change", syncVoiceControls);
+els.testVoice.addEventListener("click", testVoice);
+els.language.addEventListener("change", loadBrowserVoices);
+if (window.speechSynthesis) {
+  // Chrome populates the list asynchronously, and again when network voices
+  // finish loading, so this fires more than once.
+  window.speechSynthesis.addEventListener("voiceschanged", loadBrowserVoices);
+}
 els.sessionPicker.addEventListener("change", pickSession);
 els.deleteSession.addEventListener("click", deleteViewedSession);
 els.forgetAll.addEventListener("click", forgetAll);
@@ -1479,3 +1660,5 @@ syncProfileUI();
 loadModes();
 loadEngines();
 loadPricing();
+loadVoiceModes();
+loadBrowserVoices();

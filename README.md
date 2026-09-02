@@ -10,7 +10,7 @@ model and back.
 | Engine | Transport | Feel | Cost |
 | --- | --- | --- | --- |
 | `realtime` | WebRTC to the Realtime model | Open mic, interrupt any time, ~0.5s replies | Audio tokens in *and* out |
-| `pipeline` | WebSocket, turn by turn | One speaker at a time, ~1.5-3s replies | Per-minute STT + text tokens |
+| `pipeline` | WebSocket, turn by turn | One speaker at a time, ~1.5-3s replies | Per-minute STT + text tokens, free voice by default |
 
 Pick from the **Engine** dropdown. `realtime` is the default and is unchanged.
 
@@ -51,6 +51,7 @@ app/
   pipeline.py   transcription + streaming text completion for the cheap engine
   session.py    server-held conversation state for the cheap engine
   assess.py     grades one answer, for the proficiency gauge
+  speech.py     optional neural tutor voice, one sentence at a time
   config.py     models, voice, VAD, engine, PRICING, scoring constants
 static/
   index.html    three-pane UI; chat pane is bar / meters / drawer / transcript
@@ -117,6 +118,57 @@ Swap models in `app/config.py` (`PIPELINE_TRANSCRIPTION_MODEL`,
 
 Listening `auto` / `manual` works in both: `auto` ends your turn for you,
 `manual` waits for the button.
+
+## The tutor's voice (turn-based engine only)
+
+Realtime speaks for itself. The turn-based engine has two options, chosen from
+**Tutor voice** in the settings bar.
+
+### Browser voice — free
+
+The student's own machine speaks. No network, no cost, no key.
+
+Quality is entirely down to which voices are installed, and the ranking matters
+more than it sounds: `speechSynthesis.getVoices()` returns them in OS order,
+which on Windows puts the old SAPI "Microsoft David/Zira **Desktop**" voices
+first. Taking the first match by language is what made the tutor sound robotic.
+
+`voiceScore()` now ranks by name, best first — Google's network voices, then
+Windows "Natural", then neural/premium/enhanced/Siri — and pushes the Desktop
+SAPI voices to the bottom. An exact locale beats a same-language one, so a
+request for `en-US` no longer lands on `en-GB`. Whatever it picks, the dropdown
+beside it lists every installed voice so the choice can be overridden, and
+**Test** speaks a sample.
+
+Two free ways to get better voices if the list is thin:
+
+- **Chrome** ships Google's online voices (marked `· online` in the dropdown).
+  They are much better than SAPI and cost nothing.
+- **Windows 11**: Settings → Accessibility → Narrator → Add natural voices
+  installs Microsoft Aria/Guy/Jenny Natural, which then appear in the list.
+
+### OpenAI neural voice — costs per minute
+
+`gpt-4o-mini-tts`, synthesised **a sentence at a time as the reply streams**,
+not once at the end — the student starts hearing sentence one while the model is
+still writing sentence two, which is the latency this engine can least afford.
+Sentences shorter than `SPEECH_MIN_CHARS` ride along with the next one rather
+than spending a round trip on "Right."
+
+It also takes delivery notes (`SPEECH_INSTRUCTIONS`), which `tts-1` does not.
+The tutor prompt governs what is said; that governs how it lands.
+
+If synthesis fails mid-turn, the server says so and the browser voice finishes
+the session rather than leaving the student in silence.
+
+**What it costs.** Roughly $0.23 for a 20-minute lesson where the tutor speaks
+about eight minutes, which takes a turn-based session from about $0.01 to about
+$0.24 — still roughly four times cheaper than Realtime. The rate is in `PRICING`
+under `gpt-4o-mini-tts`: `text_input` and `audio_output` are quoted from the
+pricing page, but `per_minute` is **derived**, because the speech endpoint
+returns no usage block. The browser times the clip it actually played and prices
+it with that, so these land among the legs the ticker counts as "timed here"
+rather than reported.
 
 ## Tracking a student
 
@@ -278,9 +330,11 @@ that file via `/api/modes`.
 - `pipeline` cannot be interrupted. The prompt still tells the tutor to stop if
   the student cuts in, which only the `realtime` engine can honour.
 - Browser speech synthesis quality varies by platform and language, and a voice
-  for the chosen language may not be installed. To trade the saving back for
-  quality, add a TTS call in `app/pipeline.py` and stream audio over the
-  existing socket.
+  for the chosen language may not be installed at all. The dropdown says what is
+  there; if it is thin, see the free options above or switch to the neural voice.
+- `gpt-4o-mini-tts` has no per-minute rate published and returns no usage block,
+  so its cost is derived from the played duration. It is the least exact figure
+  in the ticker.
 - The end-of-turn detector is a plain RMS threshold (`SPEECH_RMS` in `app.js`).
   A noisy room will end turns late; a very quiet speaker may need **Send**.
 - Turn-based sessions live in process memory: single worker only, and a restart

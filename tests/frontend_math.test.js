@@ -19,6 +19,7 @@ const RATES = {
                        text_output: 16, audio_output: 64 },
     "test-chat": { text_input: 0.15, cached_input: 0.075, text_output: 0.6 },
     "test-stt": { per_minute: 0.003, audio_input: 1.25 },
+    "test-tts": { text_input: 0.6, audio_output: 12, per_minute: 0.0289 },
   },
   verdict_scores: { correct: 1, partial: 0.5, incorrect: 0 },
   as_of: "fixture",
@@ -45,6 +46,9 @@ function loadAppFunctions() {
       out.dialPoint = dialPoint;
       out.DIAL = DIAL;
       out.setPrices = (p) => { prices = p; };
+      out.voicesFor = voicesFor;
+      out.voiceScore = voiceScore;
+      out.setVoices = (list) => { window.speechSynthesis = { getVoices: () => list }; };
     `)(
     { getElementById: stub, createElement: stub },
     { getItem: () => null, setItem() {} },
@@ -123,6 +127,13 @@ near("realtime treats an unsplit cache total as text",
     output_token_details: { text_tokens: 40, audio_tokens: 300 } } }).usd,
   (50 * 4 + 500 * 32 + 150 * 0.4 + 40 * 16 + 300 * 64) / 1e6);
 
+// TTS is billed by the clock like STT. Routing it through the chat branch
+// priced every spoken sentence at zero.
+near("tts is priced by the seconds actually played",
+  app.priceUsage("tts", "test-tts", { seconds: 60 }).usd, 0.0289);
+is("tts says the duration was measured here",
+  app.priceUsage("tts", "test-tts", { seconds: 3 }).measured, "measured");
+
 is("an unpriced model reports nothing rather than zero",
   app.priceUsage("chat", "model-with-no-rate", { usage: {} }), null);
 
@@ -162,6 +173,30 @@ near("dash length matches the CSS dasharray",
   Number(((app.DIAL.sweep * Math.PI / 180) * app.DIAL.r).toFixed(2)), 167.55);
 near("half the sweep sits at the top of the arc",
   Number(app.dialPoint(0.5, app.DIAL.r).y.toFixed(2)), app.DIAL.cy - app.DIAL.r);
+
+// --- browser voice ranking ---
+// getVoices() comes back worst-first on Windows; taking the first match is
+// what made the tutor sound robotic.
+const V = (name, lang, localService) => ({ name, lang, localService });
+app.setVoices([
+  V("Microsoft David Desktop - English (United States)", "en-US", true),
+  V("Microsoft Zira Desktop - English (United States)", "en-US", true),
+  V("Google UK English Female", "en-GB", false),
+  V("Google US English", "en-US", false),
+  V("Microsoft Aria Online (Natural) - English (United States)", "en-US", false),
+  V("Google espanol", "es-ES", false),
+]);
+
+const ranked = app.voicesFor("en-US").map((v) => v.name);
+is("the best voice wins, not the first one listed", ranked[0], "Google US English");
+is("old SAPI desktop voices sink", ranked.indexOf("Microsoft David Desktop - English (United States)") > 1, true);
+is("an exact locale beats a same-language one", ranked.indexOf("Google UK English Female"),
+   ranked.length - 1);
+is("another language is filtered out entirely", ranked.includes("Google espanol"), false);
+is("a natural voice outranks a desktop one",
+   app.voiceScore(V("Microsoft Aria Online (Natural)", "en-US", false))
+   > app.voiceScore(V("Microsoft David Desktop", "en-US", true)), true);
+is("spanish resolves to a spanish voice", app.voicesFor("es-ES")[0].name, "Google espanol");
 
 // --- formatting ---
 is("sub-cent amounts keep four places", app.money(0.00042), "$0.0004");

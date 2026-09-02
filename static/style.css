@@ -44,6 +44,12 @@ body {
 .field.key { flex: 1 1 180px; }
 .field.url { flex: 2 1 280px; }
 .field.actions { flex-direction: row; gap: 8px; margin-left: auto; }
+.field.voice { flex: 1 1 340px; min-width: 0; }
+.voice-row { display: flex; gap: 6px; align-items: stretch; min-width: 0; }
+.voice-row select { min-width: 0; flex: 1 1 auto; }
+.voice-row #voice-mode { flex: 1 1 55%; }
+.voice-row .ghost { flex: none; align-self: stretch; }
+.hidden { display: none !important; }
 #listen { background: var(--bg); border-color: var(--line); color: var(--text); }
 #listen:disabled { opacity: 0.4; }
 

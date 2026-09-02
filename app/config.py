@@ -24,6 +24,35 @@ TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
 CHAT_URL = "https://api.openai.com/v1/chat/completions"
 
 PIPELINE_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+
+# --- Tutor voice for the turn-based engine ---------------------------------
+# "browser" costs nothing and never leaves the machine, but its quality is
+# whatever voices the OS happens to have. "openai" swaps in a neural voice at
+# real per-minute cost; the ticker prices it like any other call.
+SPEECH_URL = "https://api.openai.com/v1/audio/speech"
+SPEECH_MODEL = "gpt-4o-mini-tts"
+SPEECH_VOICES = ["coral", "sage", "alloy", "ash", "ballad", "echo", "shimmer", "verse"]
+SPEECH_VOICE = "coral"
+
+# mp3 plays everywhere without decoding work in the browser.
+SPEECH_FORMAT = "mp3"
+
+# Don't spend a whole API round trip on "Right." -- merge short sentences into
+# the next one before synthesising.
+SPEECH_MIN_CHARS = 30
+
+# gpt-4o-mini-tts takes free-text delivery notes (tts-1 does not). The tutor
+# prompt already governs *what* is said; this governs how it lands.
+SPEECH_INSTRUCTIONS = (
+    "You are a warm, patient tutor speaking one-to-one with a student. "
+    "Unhurried and conversational, never newsreader-brisk. Let questions rise "
+    "at the end and land, as if you are actually waiting for an answer."
+)
+
+VOICE_MODES = {
+    "browser": "Browser voice — free",
+    "openai": "OpenAI neural voice — costs per minute",
+}
 PIPELINE_CHAT_MODEL = "gpt-4o-mini"
 
 # The voice rules cap turns at 2-4 sentences, so this is a runaway guard.
@@ -78,6 +107,13 @@ PRICING = {
         "cached_input": 0.075,
         "text_output": 0.60,
     },
+    # text_input and audio_output are quoted. per_minute is DERIVED: the speech
+    # endpoint returns no usage block, so the browser times the clip it played
+    # and prices it with this. 2400 audio tokens/minute is the rate implied by
+    # the transcribe models above ($0.003/min at $1.25/1M), plus a little for
+    # the text going in. Treat it as an estimate, and note the ticker counts it
+    # among the legs "timed here" rather than reported.
+    SPEECH_MODEL: {"text_input": 0.60, "audio_output": 12.00, "per_minute": 0.0289},
 }
 
 # A per-session spend limit, so the cost meter has a real limit to read against.

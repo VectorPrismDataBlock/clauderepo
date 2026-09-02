@@ -15,6 +15,11 @@ from .config import (
     PIPELINE_CHAT_MODEL,
     PIPELINE_TRANSCRIPTION_MODEL,
     PRICING,
+    SPEECH_MIN_CHARS,
+    SPEECH_MODEL,
+    SPEECH_VOICE,
+    SPEECH_VOICES,
+    VOICE_MODES,
     PRICING_AS_OF,
     REALTIME_MODEL,
     STATIC_DIR,
@@ -22,6 +27,7 @@ from .config import (
 )
 from .lesson import LessonError, fetch_lesson, inject_base_href
 from .pipeline import PipelineError, stream_reply, transcribe
+from .speech import SpeechError, mime_type, synthesize
 from .prompts import MODES, build_instructions
 from .realtime import RealtimeError, mint_client_secret
 from .session import TutorSession, sessions
@@ -39,6 +45,8 @@ class SessionRequest(BaseModel):
     difficulty: str = "intermediate"
     pace: str = "normal"
     memory: str = ""
+    voice_mode: str = "browser"
+    voice: str = SPEECH_VOICE
 
 
 class AssessRequest(BaseModel):
@@ -54,6 +62,16 @@ class AssessRequest(BaseModel):
 @app.get("/api/modes")
 def list_modes():
     return [{"id": key, "label": value["label"]} for key, value in MODES.items()]
+
+
+@app.get("/api/voices")
+def list_voices():
+    """Voice options for the turn-based engine. Realtime picks its own."""
+    return {
+        "modes": [{"id": k, "label": v} for k, v in VOICE_MODES.items()],
+        "openai_voices": SPEECH_VOICES,
+        "default_voice": SPEECH_VOICE,
+    }
 
 
 @app.get("/api/engines")
@@ -78,6 +96,7 @@ def pricing():
             "pipeline_chat": PIPELINE_CHAT_MODEL,
             "pipeline_stt": PIPELINE_TRANSCRIPTION_MODEL,
             "assess": ASSESS_MODEL,
+            "speech": SPEECH_MODEL,
         },
         "verdict_scores": VERDICT_SCORES,
     }
@@ -143,6 +162,10 @@ async def create_session(req: SessionRequest):
         raise HTTPException(400, f"Unknown mode: {req.mode}")
     if req.listening_mode not in {"auto", "manual"}:
         raise HTTPException(400, f"Unknown listening mode: {req.listening_mode}")
+    if req.voice_mode not in VOICE_MODES:
+        raise HTTPException(400, f"Unknown voice mode: {req.voice_mode}")
+    if req.voice not in SPEECH_VOICES:
+        raise HTTPException(400, f"Unknown voice: {req.voice}")
 
     try:
         _, lesson, title = await fetch_lesson(req.lesson_url)
@@ -162,7 +185,13 @@ async def create_session(req: SessionRequest):
     common = {"engine": req.engine, "lesson_title": title, "lesson_chars": len(lesson)}
 
     if req.engine == "pipeline":
-        session_id = sessions.create(req.api_key.strip(), instructions, lesson)
+        session_id = sessions.create(
+            req.api_key.strip(),
+            instructions,
+            lesson,
+            voice_mode=req.voice_mode,
+            voice=req.voice,
+        )
         return {
             **common,
             "session_id": session_id,
@@ -204,23 +233,101 @@ async def _report_usage(websocket: WebSocket, kind: str, model: str, **detail) -
     await websocket.send_json({"type": "usage", "kind": kind, "model": model, **detail})
 
 
+_WIDE_ENDERS = "…。！？"
+
+
+def _sentence_end(text: str) -> int:
+    """Index of the first real sentence end, or -1.
+
+    Mirrors the same function in app.js: skips the dot in "3.5", and waits for
+    trailing whitespace so a terminator mid-stream is not cut early.
+    """
+    for i, ch in enumerate(text):
+        if ch in _WIDE_ENDERS:
+            return i
+        if ch not in ".!?":
+            continue
+        if (
+            ch == "."
+            and i
+            and text[i - 1].isdigit()
+            and i + 1 < len(text)
+            and text[i + 1].isdigit()
+        ):
+            continue
+        if i + 1 < len(text) and text[i + 1].isspace():
+            return i
+    return -1
+
+
+async def _say(websocket: WebSocket, session: TutorSession, item_id: str, text: str) -> bool:
+    """Synthesise one sentence and stream it. False means fall back to the browser."""
+    line = text.strip()
+    if not line:
+        return True
+
+    try:
+        audio = await synthesize(session.api_key, line, session.voice or SPEECH_VOICE)
+    except SpeechError as exc:
+        # Never leave the student in silence: tell the browser to take over
+        # with its own voice for the rest of the session.
+        session.voice_mode = "browser"
+        await websocket.send_json({"type": "speech.failed", "message": exc.message})
+        return False
+
+    await websocket.send_json(
+        {
+            "type": "audio.delta",
+            "item_id": item_id,
+            "mime": mime_type(),
+            "data": base64.b64encode(audio).decode(),
+        }
+    )
+    return True
+
+
 async def _speak(websocket: WebSocket, session: TutorSession) -> None:
-    """Stream one tutor turn to the browser as transcript deltas."""
+    """Stream one tutor turn to the browser as transcript deltas.
+
+    With the neural voice on, each finished sentence is synthesised as it lands
+    rather than waiting for the whole reply -- the student starts hearing the
+    answer while the model is still writing the rest of it.
+    """
     item_id = uuid.uuid4().hex
     reply: list[str] = []
+    unsaid = ""
 
     async for event in stream_reply(session.api_key, session.messages()):
         if "usage" in event:
             await _report_usage(websocket, "chat", PIPELINE_CHAT_MODEL, usage=event["usage"])
             continue
-        reply.append(event["delta"])
+
+        delta = event["delta"]
+        reply.append(delta)
         await websocket.send_json(
             {
                 "type": "response.output_audio_transcript.delta",
                 "item_id": item_id,
-                "delta": event["delta"],
+                "delta": delta,
             }
         )
+
+        if session.voice_mode != "openai":
+            continue
+
+        unsaid += delta
+        while True:
+            cut = _sentence_end(unsaid)
+            # Hold a very short sentence back and let it ride with the next one.
+            if cut == -1 or cut + 1 < SPEECH_MIN_CHARS:
+                break
+            if not await _say(websocket, session, item_id, unsaid[: cut + 1]):
+                unsaid = ""
+                break
+            unsaid = unsaid[cut + 1 :]
+
+    if session.voice_mode == "openai" and unsaid.strip():
+        await _say(websocket, session, item_id, unsaid)
 
     session.add("assistant", "".join(reply))
     await websocket.send_json({"type": "response.done", "item_id": item_id})

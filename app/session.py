@@ -24,6 +24,10 @@ class TutorSession:
     # Kept so the grader can check an answer against the material. Without it
     # a grader has no ground truth and hedges every verdict to "partial".
     lesson: str = ""
+    # "browser" (free, the student's own machine speaks) or "openai" (a neural
+    # voice, synthesised a sentence at a time and billed per minute).
+    voice_mode: str = "browser"
+    voice: str = ""
     created: float = field(default_factory=time.monotonic)
     # Dialogue only. The system message is rebuilt from `instructions` on every
     # request so it stays byte-identical and keeps hitting the prompt cache.
@@ -45,11 +49,11 @@ class SessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, TutorSession] = {}
 
-    def create(self, api_key: str, instructions: str, lesson: str = "") -> str:
+    def create(self, api_key: str, instructions: str, lesson: str = "", **fields) -> str:
         self._reap()
         session_id = uuid.uuid4().hex
         self._sessions[session_id] = TutorSession(
-            api_key=api_key, instructions=instructions, lesson=lesson
+            api_key=api_key, instructions=instructions, lesson=lesson, **fields
         )
         return session_id
 

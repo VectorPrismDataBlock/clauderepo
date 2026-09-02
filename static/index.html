@@ -63,6 +63,19 @@
         </select>
       </div>
 
+      <div class="field voice">
+        <label for="voice-mode">Tutor voice</label>
+        <div class="voice-row">
+          <select id="voice-mode">
+            <option value="browser">Browser voice — free</option>
+            <option value="openai">OpenAI neural voice — costs per minute</option>
+          </select>
+          <select id="browser-voice" title="Voices installed on this machine, best first"></select>
+          <select id="openai-voice" class="hidden"></select>
+          <button id="test-voice" class="ghost" type="button">Test</button>
+        </div>
+      </div>
+
       <div class="field">
         <label for="listening-mode">Listening</label>
         <select id="listening-mode">
