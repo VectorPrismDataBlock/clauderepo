@@ -80,9 +80,16 @@ PRICING = {
     },
 }
 
-# A per-session spend limit, so the cost meter has a real limit to read
-# against. Editable in the UI; this is only the default.
-DEFAULT_SESSION_BUDGET_USD = 0.25
+# A per-session spend limit, so the cost meter has a real limit to read against.
+# These MUST be scaled per engine: the two are orders of magnitude apart, and a
+# budget set for Realtime leaves the pipeline meter pinned at zero all session,
+# which reads as a broken dial rather than a cheap one.
+# Rough sizing at the rates above: a Realtime turn lands near $0.03, a pipeline
+# turn near $0.0004. Both budgets are therefore about a 30-turn lesson.
+DEFAULT_SESSION_BUDGET_USD = {
+    "realtime": 1.00,
+    "pipeline": 0.015,
+}
 
 # --- Proficiency scoring ---------------------------------------------------
 # One small graded call per student answer, off the tutor's latency path. The

@@ -169,10 +169,15 @@ Two decisions worth knowing:
 - **It runs off the latency path.** The call fires after the tutor's reply is
   already playing, and it is never awaited. If it fails, the lesson carries on
   ungraded.
-- **The prompt carries the lesson title, never the lesson body.** That is what
-  keeps a graded turn to a fraction of a cent, and it is why grading works the
-  same on both engines -- the Realtime model speaks every token it produces, so
-  it could not emit a hidden score even if asked to.
+- **The prompt carries the lesson itself**, in the system message where it is a
+  stable prefix and hits the prompt cache from the second graded answer onward.
+  An earlier version sent only the lesson *title* to save tokens; with nothing
+  to check an answer against, the grader returned `partial` every single time
+  and the gauge sat at exactly 50% forever. A grader needs ground truth.
+  `app/session.py` keeps the lesson for both engines so the grader can reach it
+  (Realtime's copy holds no API key -- `/api/assess` brings its own).
+- **The rubric forbids the hedge.** `partial` means genuinely half right, not
+  "unsure". If the answer is `off_topic` it scores nothing either way.
 
 The gauge is an exponentially weighted average (`PROF_ALPHA`, 0.3), so it tracks
 where the student is *now* rather than averaging away a recovery. `off_topic`
@@ -185,10 +190,18 @@ Proficiency is a ratio against a limit and cost is a ratio against a budget --
 which is what a meter is for. Neither is a donut or a pie; nothing is being
 compared by angle.
 
-They are deliberately small. The transcript is the product; the meters are
-instrumentation, and instrumentation that crowds out the thing it measures is
-worse than none. Their size is fixed in pixels, never a percentage of the pane,
-so they cannot grow into the conversation.
+They are deliberately small -- 44px, dial beside its reading, both on one row
+about 60px tall. The transcript is the product; the meters are instrumentation,
+and instrumentation that crowds out the thing it measures is worse than none.
+The transcript holds roughly 77% of the chat pane with the drawer shut and 41%
+with it open, and it has a floor so it can never be squeezed out entirely.
+
+**The budget defaults are per engine and that matters.** A Realtime turn costs
+around a hundred times a pipeline turn. One budget for both left the pipeline
+meter at a fraction of a percent all session, which reads as a dead dial rather
+than a cheap one. Both defaults are sized so a turn moves the arc a few percent;
+`tests/test_assess.py` asserts that a turn is worth between 1% and 20% of budget
+on each engine, so the meter cannot silently go dead again.
 
 Three rules they follow, all worth keeping if you edit them:
 
@@ -288,8 +301,10 @@ that file via `/api/modes`.
 - Clip timing is only used when the API reports no usage of its own. Decoded
   duration is exact, but whether OpenAI rounds up or applies a minimum is not
   something this can know -- that leg is the softest figure on screen.
-- Grading is one small model's opinion of one exchange, with no view of the
-  lesson text. It is good enough to steer a gauge, not to grade a course.
+- Grading is one small model's opinion of one exchange. It reads the lesson, but
+  it is good enough to steer a gauge, not to grade a course. When a session has
+  expired, grading falls back to a blind rubric and the reading says how many
+  answers were scored that way.
 - No auth or rate limiting.
 - `MAX_LESSON_CHARS` (20k) truncates long lessons rather than chunking them.
 - If `POST /api/session` returns a 400 about unknown parameters, the Realtime

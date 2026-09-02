@@ -21,6 +21,9 @@ from .config import PIPELINE_HISTORY_TURNS, SESSION_TTL_SECONDS
 class TutorSession:
     api_key: str
     instructions: str
+    # Kept so the grader can check an answer against the material. Without it
+    # a grader has no ground truth and hedges every verdict to "partial".
+    lesson: str = ""
     created: float = field(default_factory=time.monotonic)
     # Dialogue only. The system message is rebuilt from `instructions` on every
     # request so it stays byte-identical and keeps hitting the prompt cache.
@@ -42,10 +45,12 @@ class SessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, TutorSession] = {}
 
-    def create(self, api_key: str, instructions: str) -> str:
+    def create(self, api_key: str, instructions: str, lesson: str = "") -> str:
         self._reap()
         session_id = uuid.uuid4().hex
-        self._sessions[session_id] = TutorSession(api_key=api_key, instructions=instructions)
+        self._sessions[session_id] = TutorSession(
+            api_key=api_key, instructions=instructions, lesson=lesson
+        )
         return session_id
 
     def get(self, session_id: str) -> TutorSession | None:

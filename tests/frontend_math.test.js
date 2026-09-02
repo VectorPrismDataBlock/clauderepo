@@ -167,6 +167,11 @@ near("half the sweep sits at the top of the arc",
 is("sub-cent amounts keep four places", app.money(0.00042), "$0.0004");
 is("larger amounts round to cents", app.money(1.5), "$1.50");
 is("zero is not blank", app.money(0), "$0.0000");
+// A flat 2dp rendered a $0.015 pipeline budget as "$0.01", which made the
+// percentage printed beside it look wrong.
+is("a small budget keeps three places", app.money(0.015), "$0.015");
+is("a few cents keeps three places", app.money(0.041), "$0.041");
+is("dimes and up round to cents", app.money(0.18), "$0.18");
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall frontend maths ok");
 process.exit(failures ? 1 : 0);

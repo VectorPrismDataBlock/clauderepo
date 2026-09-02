@@ -69,7 +69,13 @@ class EngineSelectionTests(unittest.TestCase):
         mint.assert_awaited_once()
         self.assertEqual(data["engine"], "realtime")
         self.assertEqual(data["client_secret"], "ek_123")
-        self.assertNotIn("session_id", data)
+
+        # Realtime gets a server session too, but only to hold the lesson for
+        # the grader. The key is deliberately not kept -- /api/assess brings
+        # its own on every call.
+        held = sessions.get(data["session_id"])
+        self.assertEqual(held.api_key, "")
+        self.assertIn("mitochondria", held.lesson)
 
     def test_pipeline_creates_a_session_without_calling_openai(self):
         with patch("app.main.fetch_lesson", fake_fetch_lesson), \
@@ -81,8 +87,12 @@ class EngineSelectionTests(unittest.TestCase):
         self.assertEqual(data["ws"], f"/api/pipeline/ws/{data['session_id']}")
         self.assertEqual(data["lesson_title"], "Cell Biology")
 
-        # The lesson is baked into the system prompt the socket will replay.
-        self.assertIn("mitochondria", sessions.get(data["session_id"]).instructions)
+        # The lesson is baked into the system prompt the socket will replay,
+        # and kept verbatim so the grader can check answers against it.
+        held = sessions.get(data["session_id"])
+        self.assertIn("mitochondria", held.instructions)
+        self.assertIn("mitochondria", held.lesson)
+        self.assertEqual(held.api_key, "sk-test")
 
 
 class PipelineSocketTests(unittest.TestCase):

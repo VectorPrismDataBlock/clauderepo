@@ -69,6 +69,7 @@ const els = {
   costLabel: document.getElementById("cost-label"),
   costSpark: document.getElementById("cost-spark"),
   costAsof: document.getElementById("cost-asof"),
+  drawerSummary: document.getElementById("drawer-summary"),
   costBreakdown: document.getElementById("cost-breakdown"),
   costClear: document.getElementById("cost-clear"),
   budget: document.getElementById("budget"),
@@ -266,6 +267,7 @@ function beginLiveSession() {
     cost: emptyCost(),
   };
   viewing = "live";
+  restoreBudget();
   renderAll();
 }
 
@@ -388,9 +390,13 @@ function recordUsage(kind, model, detail) {
   renderCost();
 }
 
+/** Enough places to stay meaningful at pipeline scale. A flat 2dp turned a
+ *  $0.015 budget into "$0.01", which made the reading beside it nonsense. */
 function money(usd) {
   if (!usd) return "$0.0000";
-  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  if (usd < 0.1) return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(2)}`;
 }
 
 function allTimeCost() {
@@ -447,12 +453,17 @@ async function gradeAnswer(question, answer) {
         answer,
         lesson_title: live.title,
         language: els.language.value,
+        session_id: live.serverSessionId || "",
       }),
     });
     if (!res.ok) return; // grading is best-effort and never interrupts the lesson
     const data = await res.json();
 
-    live.assessments.push({ ...data.assessment, at: new Date().toISOString() });
+    live.assessments.push({
+      ...data.assessment,
+      blind: data.graded_against_lesson === false,
+      at: new Date().toISOString(),
+    });
     recordUsage("assess", data.model, { usage: data.usage });
     renderProficiency();
     renderProfile();
@@ -549,7 +560,10 @@ function renderTicks(group, fractions) {
 }
 
 function setDial(arc, fraction, state) {
-  const clamped = Math.max(0, Math.min(1, fraction));
+  let clamped = Math.max(0, Math.min(1, fraction));
+  // Anything above zero gets a visible nub. Below about 2% the round cap alone
+  // renders as nothing, which reads as a dead meter rather than a small value.
+  if (clamped > 0) clamped = Math.max(clamped, 0.02);
   arc.style.strokeDashoffset = `${DIAL.length * (1 - clamped)}`;
   arc.setAttribute("class", `dial-fill ${state}`);
 }
@@ -586,16 +600,17 @@ function renderProficiency() {
   const session = sessionById(viewing);
   const stored = session && session.proficiency;
   const value = stored == null ? proficiencyOf(session) : stored;
-  const graded = ((session && session.assessments) || []).length;
+  const answers = ((session && session.assessments) || []).length;
 
   renderTicks(els.profTicks, PROF_TICKS);
-  els.profCount.textContent = graded ? `${graded} graded` : "Proficiency";
 
   if (value == null) {
     setDial(els.profArc, 0, "");
     els.profValue.textContent = "--";
-    els.profLabel.textContent = session ? "Awaiting answers" : "Not assessed";
-    els.profCount.textContent = "Proficiency";
+    els.profLabel.textContent = session ? "waiting" : "not assessed";
+    els.profCount.textContent = session
+      ? "answer a question to start scoring"
+      : "no answers graded yet";
     els.profNote.textContent = "";
     return;
   }
@@ -603,11 +618,19 @@ function renderProficiency() {
   const band = proficiencyBand(value);
   setDial(els.profArc, value, band.cls);
   els.profValue.textContent = `${Math.round(value * 100)}%`;
-  // The state is always named, never carried by the colour alone.
-  els.profLabel.innerHTML = `<span class="state">${band.label}</span>`;
+  // Status colour never carries the meaning on its own: the band is named.
+  els.profLabel.textContent = band.label;
 
-  const weakest = (session.assessments || []).slice(-1)[0];
-  els.profNote.textContent = weakest ? `Last: ${weakest.concept} — ${weakest.verdict}` : "";
+  // "8 graded" said nothing about what was graded or out of what.
+  const blind = (session.assessments || []).filter((a) => a.blind).length;
+  els.profCount.textContent = blind
+    ? `${answers} answer${answers === 1 ? "" : "s"} graded · ${blind} without the lesson`
+    : `${answers} answer${answers === 1 ? "" : "s"} graded`;
+
+  const last = (session.assessments || []).slice(-1)[0];
+  els.profNote.textContent = last
+    ? `Last answer: ${last.concept} — ${last.verdict}${last.note ? ` (${last.note})` : ""}`
+    : "";
 }
 
 function renderCost() {
@@ -624,14 +647,14 @@ function renderCost() {
   if (!budget) {
     els.costLabel.textContent = "no budget set";
   } else if (fraction > 1) {
-    els.costLabel.innerHTML = `<span class="state">${money(cost.total - budget)} over</span>`;
+    els.costLabel.textContent = `${money(cost.total - budget)} over`;
   } else {
-    els.costLabel.innerHTML =
-      `<span class="state">${Math.round(fraction * 100)}%</span> of ${money(budget)}`;
+    els.costLabel.textContent = `${Math.round(fraction * 100)}% of ${money(budget)}`;
   }
 
-  els.costAsof.textContent = prices ? "Cost" : "No rates";
+  els.costAsof.textContent = costSubtitle(cost);
   els.costBreakdown.textContent = costBreakdown(cost);
+  renderDrawerSummary();
 }
 
 function costState(fraction) {
@@ -640,8 +663,16 @@ function costState(fraction) {
   return "good";
 }
 
-/** One line of fine print that says what the figure is made of, and how
- *  much of it was measured here rather than reported by the API. */
+/** One short line under the cost reading, saying how solid the figure is. */
+function costSubtitle(cost) {
+  if (!prices) return "no rate table loaded";
+  if (cost.unpriced) return `${cost.unpriced} call(s) could not be priced`;
+  if (!cost.calls) return `rates as of ${prices.as_of}`;
+  return cost.estimatedLegs
+    ? `${cost.calls} calls · ${cost.estimatedLegs} timed here`
+    : `${cost.calls} calls · all reported`;
+}
+
 function costBreakdown(cost) {
   if (!prices) return "No rate table loaded — nothing priced.";
 
@@ -649,17 +680,32 @@ function costBreakdown(cost) {
     .filter(([, usd]) => usd > 0)
     .map(([kind, usd]) => `${kind} ${money(usd)}`);
 
-  if (!parts.length && !cost.unpriced) return `${money(allTimeCost())} all time · rates ${prices.as_of}`;
+  if (!parts.length) return `${money(allTimeCost())} across all stored sessions.`;
+  return `${parts.join(" · ")} · ${money(allTimeCost())} all time`;
+}
 
-  const notes = [];
-  if (parts.length) notes.push(parts.join(" · "));
-  if (cost.estimatedLegs) notes.push(`${cost.estimatedLegs} timed here`);
-  if (cost.unpriced) notes.push(`${cost.unpriced} unpriced`);
-  return notes.join(" · ");
+/** The drawer is shut most of the time, so its label carries the digest. */
+function renderDrawerSummary() {
+  const graded = allSessions().reduce((n, s) => n + (s.assessments || []).length, 0);
+  const bits = ["Learner profile, spend detail & export"];
+  if (graded) bits.push(`${graded} answers graded`);
+  bits.push(`${money(allTimeCost())} all time`);
+  els.drawerSummary.textContent = bits.join(" · ");
 }
 
 // --- budget ---------------------------------------------------------------
 // The meter needs a limit to read against, or the arc means nothing.
+
+function budgetEngine() {
+  const session = sessionById(viewing);
+  return (session && session.engine) || els.engine.value || "realtime";
+}
+
+function defaultBudget(forEngine) {
+  const defaults = (prices && prices.default_budget_usd) || {};
+  if (typeof defaults[forEngine] === "number") return defaults[forEngine];
+  return forEngine === "pipeline" ? 0.015 : 1.0;
+}
 
 function currentBudget() {
   const value = parseFloat(els.budget.value);
@@ -667,13 +713,17 @@ function currentBudget() {
 }
 
 function saveBudget() {
-  localStorage.setItem(BUDGET_KEY, els.budget.value);
+  localStorage.setItem(`${BUDGET_KEY}:${budgetEngine()}`, els.budget.value);
   renderCost();
 }
 
-function restoreBudget(fallback) {
-  const saved = localStorage.getItem(BUDGET_KEY);
-  els.budget.value = saved === null ? fallback : saved;
+/** Load the budget for whichever engine is in view. The two engines are orders
+ *  of magnitude apart: a Realtime-sized budget leaves the pipeline meter pinned
+ *  at zero all session, which reads as a broken dial rather than a cheap one. */
+function restoreBudget() {
+  const forEngine = budgetEngine();
+  const saved = parseFloat(localStorage.getItem(`${BUDGET_KEY}:${forEngine}`));
+  els.budget.value = Number.isFinite(saved) && saved > 0 ? saved : defaultBudget(forEngine);
 }
 
 function renderProfile() {
@@ -786,6 +836,7 @@ function syncProfileUI() {
 
 function pickSession() {
   viewing = els.sessionPicker.value;
+  restoreBudget();
   renderAll();
   if (viewing !== "live") setStatus("Viewing an archived session. Pick Live session to go back.");
 }
@@ -861,7 +912,7 @@ async function loadPricing() {
   } catch {
     prices = null; // the ticker says so rather than inventing a number
   }
-  restoreBudget(prices ? prices.default_budget_usd : 0.25);
+  restoreBudget();
   renderCost();
 }
 
@@ -973,6 +1024,7 @@ async function start() {
 
     beginLiveSession();
     setStatus("Connecting audio…");
+    live.serverSessionId = data.session_id || "";
     if (engine === "pipeline") await connectPipeline(data.ws);
     else await connect(data.client_secret);
 
@@ -1398,7 +1450,7 @@ els.clear.addEventListener("click", clearChat);
 els.readerToggle.addEventListener("click", () =>
   showReader(!els.reader.classList.contains("visible")));
 els.url.addEventListener("keydown", (e) => { if (e.key === "Enter") loadLesson(); });
-els.engine.addEventListener("change", describeEngine);
+els.engine.addEventListener("change", () => { describeEngine(); restoreBudget(); renderCost(); });
 els.sessionPicker.addEventListener("change", pickSession);
 els.deleteSession.addEventListener("click", deleteViewedSession);
 els.forgetAll.addEventListener("click", forgetAll);

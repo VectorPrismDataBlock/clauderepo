@@ -47,6 +47,8 @@ class AssessRequest(BaseModel):
     answer: str
     lesson_title: str = ""
     language: str = "English"
+    # Looked up server-side for the lesson text. Grading without it is blind.
+    session_id: str = ""
 
 
 @app.get("/api/modes")
@@ -69,7 +71,7 @@ def pricing():
     return {
         "as_of": PRICING_AS_OF,
         "rates": PRICING,
-        "default_budget_usd": DEFAULT_SESSION_BUDGET_USD,
+        "default_budget_usd": DEFAULT_SESSION_BUDGET_USD,  # keyed by engine
         "models": {
             "realtime": REALTIME_MODEL,
             "realtime_stt": INPUT_TRANSCRIPTION_MODEL,
@@ -85,6 +87,8 @@ def pricing():
 async def assess_answer(req: AssessRequest):
     """Grade one exchange. Called after the reply is already playing, so this
     never sits in front of the student."""
+    session = sessions.get(req.session_id) if req.session_id else None
+
     try:
         assessment, usage = await assess(
             req.api_key.strip(),
@@ -92,11 +96,18 @@ async def assess_answer(req: AssessRequest):
             req.question,
             req.answer,
             req.language,
+            lesson=session.lesson if session else "",
         )
     except AssessError as exc:
         raise HTTPException(exc.status, exc.message) from exc
 
-    return {"assessment": assessment, "usage": usage, "model": ASSESS_MODEL}
+    return {
+        "assessment": assessment,
+        "usage": usage,
+        "model": ASSESS_MODEL,
+        # The gauge is only trustworthy when the grader could see the material.
+        "graded_against_lesson": bool(session and session.lesson),
+    }
 
 
 @app.get("/api/lesson")
@@ -151,13 +162,18 @@ async def create_session(req: SessionRequest):
     common = {"engine": req.engine, "lesson_title": title, "lesson_chars": len(lesson)}
 
     if req.engine == "pipeline":
-        session_id = sessions.create(req.api_key.strip(), instructions)
+        session_id = sessions.create(req.api_key.strip(), instructions, lesson)
         return {
             **common,
             "session_id": session_id,
             "ws": f"/api/pipeline/ws/{session_id}",
             "model": PIPELINE_CHAT_MODEL,
         }
+
+    # Realtime talks to OpenAI directly, so the server needs nothing from it --
+    # except the lesson, which the grader checks answers against. The key is
+    # deliberately not kept: /api/assess carries its own.
+    session_id = sessions.create("", instructions, lesson)
 
     try:
         client_secret = await mint_client_secret(
@@ -168,7 +184,12 @@ async def create_session(req: SessionRequest):
     except RealtimeError as exc:
         raise HTTPException(exc.status, exc.message) from exc
 
-    return {**common, "client_secret": client_secret, "model": REALTIME_MODEL}
+    return {
+        **common,
+        "client_secret": client_secret,
+        "model": REALTIME_MODEL,
+        "session_id": session_id,
+    }
 
 
 # --- turn-based engine socket ----------------------------------------------

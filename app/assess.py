@@ -6,8 +6,11 @@ is already hearing the reply while this runs), and it works identically for
 both engines, where in-band tricks would not -- the Realtime model speaks every
 token it produces, so it cannot emit a hidden tag.
 
-The prompt carries the lesson title and the exchange, never the lesson body.
-That is what keeps a graded turn to a fraction of a cent.
+The prompt carries the lesson itself. An earlier version sent only the title to
+save tokens, and the grader -- with nothing to check an answer against --
+returned "partial" for everything, which pinned the proficiency gauge at exactly
+50% forever. The lesson now sits in the system message where it is a stable
+prefix, so prompt caching absorbs most of the cost of having it there.
 """
 
 import json
@@ -37,15 +40,39 @@ SCHEMA = {
 }
 
 PROMPT = """\
+You grade one exchange from a spoken tutoring session, against the lesson below.
+
+RUBRIC
+- "correct": the answer says something the lesson supports, even loosely worded.
+- "incorrect": the answer contradicts the lesson, or is a confident guess the
+  lesson does not support.
+- "partial": genuinely half right -- one of two required ideas, or the right
+  idea with a wrong detail attached.
+- "off_topic": a question back, a request to repeat, silence, or chit-chat.
+
+Do not use "partial" as a hedge. If the lesson lets you decide, decide. A short
+or plainly worded answer that gets the idea right is "correct", not "partial".
+
+The answer arrived via speech-to-text, so ignore transcription noise, spelling,
+punctuation and filler words. Judge the idea, not the phrasing. Name the concept
+in 1-4 words using the lesson's own vocabulary. The session runs in {language}.
+
+LESSON: {title}
+=====
+{lesson}
+====="""
+
+
+# Used when no lesson is on hand -- an expired session, or a direct API call.
+# Deliberately more cautious, because without the material there is no ground
+# truth to grade against.
+BLIND_PROMPT = """\
 You grade one exchange from a spoken tutoring session on "{title}".
 
-Judge only whether the student's answer is right about the concept the tutor \
-asked about. Be strict but fair: a vague answer that shows the right idea is \
-"partial"; a confident answer that is wrong is "incorrect"; a question back, a \
-request to repeat, or chit-chat is "off_topic".
-
-The answer arrived via speech-to-text, so ignore transcription noise, \
-punctuation and filler words. The session runs in {language}."""
+The lesson text is not available, so judge only what you can: whether the answer
+is coherent and on topic. Use "correct" only when the answer is plainly right on
+general knowledge, "off_topic" for a question back or chit-chat, and "partial"
+when you genuinely cannot tell. The session runs in {language}."""
 
 
 class AssessError(Exception):
@@ -61,12 +88,25 @@ async def assess(
     question: str,
     answer: str,
     language: str = "English",
+    lesson: str = "",
 ) -> tuple[dict, dict]:
     """Return (assessment, usage). Usage feeds the cost ticker like any other call."""
+    # The lesson goes in the system message and never changes during a
+    # session, so it is a stable prefix and hits the prompt cache from the
+    # second graded answer onwards. That is what keeps this affordable.
+    if lesson.strip():
+        system = PROMPT.format(
+            title=title or "this lesson", language=language, lesson=lesson
+        )
+    else:
+        system = BLIND_PROMPT.format(
+            title=title or "this lesson", language=language
+        )
+
     payload = {
         "model": ASSESS_MODEL,
         "messages": [
-            {"role": "system", "content": PROMPT.format(title=title or "this lesson", language=language)},
+            {"role": "system", "content": system},
             {"role": "user", "content": f"TUTOR ASKED:\n{question}\n\nSTUDENT ANSWERED:\n{answer}"},
         ],
         "max_completion_tokens": ASSESS_MAX_TOKENS,

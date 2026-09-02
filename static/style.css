@@ -48,10 +48,11 @@ body {
 #listen:disabled { opacity: 0.4; }
 
 /* --- metrics strip ---
-   Two small meters and their numbers on one row. Fixed pixel sizes, never a
-   percentage of the pane: the transcript is what should grow. */
+   Two compact meters on one row, dial beside its reading. Sized in pixels,
+   never a percentage of the pane: the transcript is what should grow. */
 :root {
-  --track: #2c313b;
+  /* Light enough to read as an unfilled track rather than a black hole. */
+  --track: #414957;
   --good: #0ca30c;
   --warning: #fab219;
   --critical: #d03b3b;
@@ -60,33 +61,38 @@ body {
 .metrics {
   flex: none;
   display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  padding: 10px 14px;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--line);
 }
 
-.dial { width: 84px; flex: none; margin: 0; text-align: center; }
-.dial svg { width: 84px; height: 59px; display: block; overflow: visible; }
-.dial-readout { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+.meter { display: flex; align-items: center; gap: 8px; flex: 1 1 175px; min-width: 0; }
+.dial { width: 44px; height: 31px; flex: none; display: block; overflow: visible; }
 
-.dial-value { font-size: 14px; font-weight: 600; line-height: 1.2; }
-.dial-label { font-size: 10px; line-height: 1.3; color: var(--muted); }
-.dial-label .state { color: var(--text); font-weight: 600; }
-.dial-sub {
-  margin: 0 0 3px;
+.meter-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.meter-name {
   font-size: 9px;
-  color: var(--muted);
-  opacity: 0.75;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.meter-read { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.meter-value { font-size: 15px; font-weight: 600; }
+.meter-state { font-size: 11px; color: var(--text); white-space: nowrap; }
+.meter-sub {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.dial-track { fill: none; stroke: var(--track); stroke-width: 8; stroke-linecap: round; }
+.dial-track { fill: none; stroke: var(--track); stroke-width: 12; stroke-linecap: round; }
 .dial-fill {
   fill: none;
   stroke: var(--muted);
-  stroke-width: 8;
+  stroke-width: 12;
   stroke-linecap: round;
   stroke-dasharray: 167.55;
   stroke-dashoffset: 167.55;
@@ -97,41 +103,17 @@ body {
 .dial-fill.critical { stroke: var(--critical); }
 
 /* Neutral, never status-coloured: thresholds are scaffolding, not state. */
-.dial-ticks line { stroke: var(--muted); stroke-width: 1.5; opacity: 0.4; }
+.dial-ticks line { stroke: var(--bg); stroke-width: 2; opacity: 0.85; }
 
-.metrics-meta {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding-top: 4px;
-}
-.meta-actions { display: flex; gap: 6px; align-items: center; }
-.inline-field { text-transform: none; letter-spacing: 0; white-space: nowrap; }
-.mini-input { width: 58px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
-.fine { color: var(--muted); font-size: 11px; margin: 0; }
-
-/* --- sparkline: cumulative spend across the session --- */
-.spark-wrap { display: flex; flex-direction: column; gap: 1px; }
-.spark-wrap .dial-sub { margin: 0; }
-.spark { width: 100%; height: 22px; display: block; }
-.spark polygon { fill: var(--muted); opacity: 0.14; }
-.spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linejoin: round; }
-.spark circle { fill: var(--accent); }
-.spark:empty { display: none; }
-
-/* --- profile / session drawer ---
-   Collapsed by default. Reference data, not something to watch. */
+/* --- profile / spend drawer ---
+   Collapsed by default. Reference data, not something to watch mid-lesson. */
 .drawer { flex: none; border-bottom: 1px solid var(--line); }
 .drawer > summary {
-  padding: 7px 14px;
+  padding: 6px 14px;
   cursor: pointer;
   list-style: none;
   color: var(--muted);
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 .drawer > summary::-webkit-details-marker { display: none; }
 .drawer > summary::before { content: "\25B8  "; }
@@ -139,11 +121,13 @@ body {
 .drawer > summary:hover { color: var(--text); }
 
 .drawer-body {
-  padding: 0 14px 12px;
+  padding: 2px 14px 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 200px;
+  gap: 10px;
+  /* Fixed and scrollable. Opening the drawer must never cost the transcript
+     more than this, however small the window. */
+  max-height: 160px;
   overflow-y: auto;
 }
 .drawer-body ul {
@@ -156,6 +140,17 @@ body {
   font-size: 12px;
 }
 .panel-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.meta-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.inline-field { text-transform: none; letter-spacing: 0; white-space: nowrap; }
+.mini-input { width: 76px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.fine { color: var(--muted); font-size: 11px; margin: 0; }
+
+/* --- sparkline: cumulative spend across the session --- */
+.spark-wrap { display: flex; flex-direction: column; gap: 3px; }
+.spark { width: 100%; height: 26px; display: block; }
+.spark polygon { fill: var(--accent); opacity: 0.16; }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
+.spark circle { fill: var(--accent); }
 
 .bar-select {
   flex: 1 1 auto;
@@ -266,7 +261,7 @@ button.ghost:hover { color: var(--text); }
 
 .transcript {
   flex: 1 1 auto;
-  min-height: 0;      /* without this the strip above squeezes it to nothing */
+  min-height: 90px;   /* it may shrink, but never out of existence */
   overflow-y: auto;
   padding: 14px;
   display: flex;

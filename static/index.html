@@ -103,55 +103,62 @@
         <button id="clear" class="ghost">Clear chat</button>
       </div>
 
-      <!-- One compact strip: two small meters and their supporting numbers.
-           Everything else lives in the drawer so the transcript keeps the pane. -->
+      <!-- Two compact meters on one row. Instrumentation sits beside its
+           reading, never above it, so the strip stays about 46px tall and the
+           transcript keeps the pane. -->
       <div class="metrics">
-        <figure class="dial">
-          <figcaption class="dial-sub" id="prof-count">Proficiency</figcaption>
-          <svg viewBox="0 0 120 84" role="img" aria-labelledby="prof-label">
+        <div class="meter">
+          <svg class="dial" viewBox="0 0 120 84" role="img" aria-labelledby="prof-value">
             <path class="dial-track" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
             <g class="dial-ticks" id="prof-ticks"></g>
             <path class="dial-fill" id="prof-arc" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
           </svg>
-          <div class="dial-readout">
-            <span class="dial-value" id="prof-value">--</span>
-            <span class="dial-label" id="prof-label">Not assessed</span>
+          <div class="meter-text">
+            <span class="meter-name">Proficiency</span>
+            <span class="meter-read">
+              <b class="meter-value" id="prof-value">--</b>
+              <span class="meter-state" id="prof-label">not assessed</span>
+            </span>
+            <span class="meter-sub" id="prof-count">no answers graded yet</span>
           </div>
-        </figure>
+        </div>
 
-        <figure class="dial">
-          <figcaption class="dial-sub" id="cost-asof">Cost</figcaption>
-          <svg viewBox="0 0 120 84" role="img" aria-labelledby="cost-label">
+        <div class="meter">
+          <svg class="dial" viewBox="0 0 120 84" role="img" aria-labelledby="cost-session">
             <path class="dial-track" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
             <g class="dial-ticks" id="cost-ticks"></g>
             <path class="dial-fill" id="cost-arc" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
           </svg>
-          <div class="dial-readout">
-            <span class="dial-value" id="cost-session">$0.0000</span>
-            <span class="dial-label" id="cost-label">of budget</span>
-          </div>
-        </figure>
-
-        <div class="metrics-meta">
-          <p id="cost-breakdown" class="fine"></p>
-          <div class="spark-wrap">
-            <span class="dial-sub">Spend this session</span>
-            <svg class="spark" id="cost-spark" viewBox="0 0 100 22" preserveAspectRatio="none"
-                 role="img" aria-label="Cumulative spend this session"></svg>
-          </div>
-          <div class="meta-actions">
-            <label class="inline-field" for="budget">Budget $</label>
-            <input id="budget" class="mini-input" type="number" min="0" step="0.05" />
-            <button id="cost-clear" class="ghost">Clear</button>
+          <div class="meter-text">
+            <span class="meter-name">Cost this session</span>
+            <span class="meter-read">
+              <b class="meter-value" id="cost-session">$0.0000</b>
+              <span class="meter-state" id="cost-label">of budget</span>
+            </span>
+            <span class="meter-sub" id="cost-asof">estimated from reported usage</span>
           </div>
         </div>
       </div>
 
       <details class="drawer">
-        <summary>Learner profile &amp; session data</summary>
+        <summary id="drawer-summary">Learner profile, spend detail &amp; export</summary>
         <div class="drawer-body">
           <ul id="learner-profile"></ul>
           <p id="prof-note" class="fine"></p>
+
+          <div class="spark-wrap">
+            <span class="meter-name">Spend across this session</span>
+            <svg class="spark" id="cost-spark" viewBox="0 0 100 22" preserveAspectRatio="none"
+                 role="img" aria-label="Cumulative spend this session"></svg>
+            <p id="cost-breakdown" class="fine"></p>
+          </div>
+
+          <div class="meta-actions">
+            <label class="inline-field" for="budget">Session budget $</label>
+            <input id="budget" class="mini-input" type="number" min="0" step="0.005" />
+            <button id="cost-clear" class="ghost">Reset ticker</button>
+          </div>
+
           <p id="session-summary" class="fine">No session yet.</p>
           <div class="panel-actions">
             <button id="export" class="ghost">Export JSON</button>
