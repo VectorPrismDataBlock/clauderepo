@@ -51,29 +51,38 @@ ENGINES = {
 }
 
 # --- Cost estimation -------------------------------------------------------
-# VERIFY THESE NUMBERS before you trust the ticker. They are USD as published
-# when this file was last touched, they move, and the ticker only ever claims
-# to be an estimate. Everything else reads rates from here, so this table is
-# the single place to correct.
-PRICING_AS_OF = "2026-05"
+# Checked against https://developers.openai.com/api/docs/pricing on the date
+# below. Rates move: re-check before quoting anything the ticker shows. This is
+# the only place prices live -- everything downstream reads from here.
+#
+# Caveat worth knowing: the pricing page lists `gpt-realtime`. REALTIME_MODEL is
+# a dated snapshot of it and is not priced separately, so it is billed here at
+# the base model's rates.
+PRICING_AS_OF = "2026-09-02"
 
 # Per 1M tokens, except `per_minute`, which is per minute of audio.
+# Transcription carries both: the API reports token usage when it can, and the
+# per-minute figure is the fallback when only a clip length is known.
 PRICING = {
     REALTIME_MODEL: {
         "text_input": 4.00,
-        "cached_input": 0.40,
+        "cached_input": 0.40,   # same rate for cached text and cached audio
         "audio_input": 32.00,
         "text_output": 16.00,
         "audio_output": 64.00,
     },
-    INPUT_TRANSCRIPTION_MODEL: {"per_minute": 0.006},
-    PIPELINE_TRANSCRIPTION_MODEL: {"per_minute": 0.003},
+    INPUT_TRANSCRIPTION_MODEL: {"per_minute": 0.006, "audio_input": 2.50},
+    PIPELINE_TRANSCRIPTION_MODEL: {"per_minute": 0.003, "audio_input": 1.25},
     PIPELINE_CHAT_MODEL: {
         "text_input": 0.15,
         "cached_input": 0.075,
         "text_output": 0.60,
     },
 }
+
+# A per-session spend limit, so the cost meter has a real limit to read
+# against. Editable in the UI; this is only the default.
+DEFAULT_SESSION_BUDGET_USD = 0.25
 
 # --- Proficiency scoring ---------------------------------------------------
 # One small graded call per student answer, off the tutor's latency path. The

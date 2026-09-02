@@ -57,13 +57,21 @@ const els = {
   deleteSession: document.getElementById("delete-session"),
   forgetAll: document.getElementById("forget-all"),
   exportBtn: document.getElementById("export"),
-  profFill: document.getElementById("prof-fill"),
+  profArc: document.getElementById("prof-arc"),
+  profTicks: document.getElementById("prof-ticks"),
+  profValue: document.getElementById("prof-value"),
   profLabel: document.getElementById("prof-label"),
   profCount: document.getElementById("prof-count"),
+  profNote: document.getElementById("prof-note"),
+  costArc: document.getElementById("cost-arc"),
+  costTicks: document.getElementById("cost-ticks"),
   costSession: document.getElementById("cost-session"),
-  costTotal: document.getElementById("cost-total"),
+  costLabel: document.getElementById("cost-label"),
+  costSpark: document.getElementById("cost-spark"),
+  costAsof: document.getElementById("cost-asof"),
   costBreakdown: document.getElementById("cost-breakdown"),
   costClear: document.getElementById("cost-clear"),
+  budget: document.getElementById("budget"),
   audio: document.getElementById("tutor-audio"),
 };
 
@@ -175,6 +183,7 @@ function appendTo(itemId, who, text) {
 // record of a student. The API key is never part of it.
 
 const STORE_KEY = "voice-tutor-store";
+const BUDGET_KEY = "voice-tutor-budget";
 const STORE_VERSION = 2;
 const PROF_ALPHA = 0.3;   // EWMA weight - recent answers move the gauge most
 const FALLBACK_SCORES = { correct: 1, partial: 0.5, incorrect: 0 };
@@ -189,7 +198,7 @@ function emptyStore() {
 }
 
 function emptyCost() {
-  return { total: 0, byKind: {}, calls: 0 };
+  return { total: 0, byKind: {}, calls: 0, trail: [], unpriced: 0, estimatedLegs: 0 };
 }
 
 function loadStore() {
@@ -296,8 +305,16 @@ function priceUsage(kind, model, detail) {
   if (!rate) return null;
 
   if (kind === "stt") {
-    const seconds = detail.seconds || 0;
-    return { usd: (seconds / 60) * (rate.per_minute || 0) };
+    const reported = detail.usage || {};
+    // Prefer what the API billed us for. Audio token counts are the real
+    // quantity; our own clip timing is an educated guess about it.
+    const tokens = reported.input_token_details?.audio_tokens
+      ?? (reported.type === "tokens" ? reported.input_tokens : 0);
+    if (tokens && rate.audio_input) {
+      return { usd: (tokens * rate.audio_input) / 1e6, measured: "reported" };
+    }
+    const seconds = reported.type === "duration" ? reported.seconds : (detail.seconds || 0);
+    return { usd: (seconds / 60) * (rate.per_minute || 0), measured: "measured" };
   }
 
   const usage = detail.usage || {};
@@ -320,7 +337,12 @@ function priceUsage(kind, model, detail) {
       (output.text_tokens || 0) * (rate.text_output || 0) +
       (output.audio_tokens || 0) * (rate.audio_output || 0)
     ) / 1e6;
-    return { usd };
+
+    // A turn that reports tokens but prices to zero means the payload shape is
+    // not what this code expects. Say so rather than quietly billing nothing.
+    const reported = (usage.input_tokens || 0) + (usage.output_tokens || 0);
+    if (!usd && reported) return { usd: 0, unpriced: true };
+    return { usd, measured: "reported" };
   }
 
   // Chat-completions shape, used by both the tutor reply and the grader.
@@ -335,16 +357,34 @@ function priceUsage(kind, model, detail) {
     cached * cachedRate +
     out * (rate.text_output || 0)
   ) / 1e6;
-  return { usd };
+
+  const reported = (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
+  if (!usd && reported) return { usd: 0, unpriced: true };
+  return { usd, measured: "reported" };
 }
 
 function recordUsage(kind, model, detail) {
+  if (!live) return;
+
   const priced = priceUsage(kind, model, detail);
-  if (!priced || !live) return;
+  if (!priced) {
+    // No rate on file for this model at all.
+    live.cost.unpriced = (live.cost.unpriced || 0) + 1;
+    return renderCost();
+  }
+  if (priced.unpriced) {
+    // Tokens were reported but priced to nothing: the payload shape moved.
+    live.cost.unpriced = (live.cost.unpriced || 0) + 1;
+    return renderCost();
+  }
 
   live.cost.total += priced.usd;
   live.cost.byKind[kind] = (live.cost.byKind[kind] || 0) + priced.usd;
   live.cost.calls += 1;
+  if (priced.measured === "measured") live.cost.estimatedLegs = (live.cost.estimatedLegs || 0) + 1;
+
+  // Cumulative trail for the sparkline.
+  (live.cost.trail = live.cost.trail || []).push(live.cost.total);
   renderCost();
 }
 
@@ -480,7 +520,64 @@ function formatMemory() {
   return parts.join(" ");
 }
 
+// --- dials ----------------------------------------------------------------
+// Both meters are the same 240-degree arc, so proficiency and spend read as one
+// pair. Geometry is fixed in the markup; only the dash offset, the state class
+// and the ticks are computed.
+
+const DIAL = { cx: 60, cy: 52, r: 40, start: 210, sweep: 240, length: 167.55 };
+
+/** Point on the arc at fraction f of the sweep, at radius `radius`. */
+function dialPoint(f, radius) {
+  const angle = ((DIAL.start - DIAL.sweep * f) * Math.PI) / 180;
+  return {
+    x: DIAL.cx + radius * Math.cos(angle),
+    y: DIAL.cy - radius * Math.sin(angle),
+  };
+}
+
+/** Neutral threshold marks, drawn inside the track. */
+function renderTicks(group, fractions) {
+  group.innerHTML = fractions
+    .map((f) => {
+      const inner = dialPoint(f, 30);
+      const outer = dialPoint(f, 34.5);
+      return `<line x1="${inner.x.toFixed(2)}" y1="${inner.y.toFixed(2)}" `
+        + `x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}" />`;
+    })
+    .join("");
+}
+
+function setDial(arc, fraction, state) {
+  const clamped = Math.max(0, Math.min(1, fraction));
+  arc.style.strokeDashoffset = `${DIAL.length * (1 - clamped)}`;
+  arc.setAttribute("class", `dial-fill ${state}`);
+}
+
+/** Cumulative spend, de-emphasised, with the current point in the accent. */
+function renderSparkline(svg, trail) {
+  if (!trail || trail.length < 2) {
+    svg.innerHTML = "";
+    return;
+  }
+
+  // Keep the last 12 points, as the stat-tile contract calls for.
+  const points = trail.slice(-12);
+  const peak = Math.max(...points) || 1;
+  const step = 100 / (points.length - 1);
+  const y = (v) => 20 - (v / peak) * 18;
+
+  const line = points.map((v, i) => `${(i * step).toFixed(2)},${y(v).toFixed(2)}`).join(" ");
+  const last = points[points.length - 1];
+  svg.innerHTML =
+    `<polyline points="${line}" vector-effect="non-scaling-stroke" />`
+    + `<circle cx="100" cy="${y(last).toFixed(2)}" r="2" vector-effect="non-scaling-stroke" />`;
+}
+
 // --- rendering ------------------------------------------------------------
+
+const PROF_TICKS = [0.35, 0.6, 0.8];   // the band boundaries, drawn neutral
+const COST_TICKS = [0.5, 0.8];         // half budget, and the warning line
 
 function renderProficiency() {
   const session = sessionById(viewing);
@@ -488,37 +585,94 @@ function renderProficiency() {
   const value = stored == null ? proficiencyOf(session) : stored;
   const graded = ((session && session.assessments) || []).length;
 
+  renderTicks(els.profTicks, PROF_TICKS);
   els.profCount.textContent = graded ? `${graded} graded` : "";
 
   if (value == null) {
-    els.profFill.style.width = "0%";
-    els.profFill.className = "gauge-fill";
+    setDial(els.profArc, 0, "");
+    els.profValue.textContent = "--";
     els.profLabel.textContent = session
       ? "Answer a question to start scoring."
       : "Not assessed yet.";
+    els.profNote.textContent = "";
     return;
   }
 
   const band = proficiencyBand(value);
-  els.profFill.style.width = `${Math.round(value * 100)}%`;
-  els.profFill.className = `gauge-fill ${band.cls}`;
-  els.profLabel.innerHTML =
-    `<span class="score">${Math.round(value * 100)}%</span> · ${band.label}`;
+  setDial(els.profArc, value, band.cls);
+  els.profValue.textContent = `${Math.round(value * 100)}%`;
+  // The state is always named, never carried by the colour alone.
+  els.profLabel.innerHTML = `<span class="state">${band.label}</span>`;
+
+  const weakest = (session.assessments || []).slice(-1)[0];
+  els.profNote.textContent = weakest ? `Last: ${weakest.concept} — ${weakest.verdict}` : "";
 }
 
 function renderCost() {
   const session = sessionById(viewing);
   const cost = (session && session.cost) || emptyCost();
+  const budget = currentBudget();
+  const fraction = budget > 0 ? cost.total / budget : 0;
+
+  renderTicks(els.costTicks, COST_TICKS);
   els.costSession.textContent = money(cost.total);
-  els.costTotal.textContent = money(allTimeCost());
+  setDial(els.costArc, fraction, costState(fraction));
+  renderSparkline(els.costSpark, cost.trail);
+
+  if (!budget) {
+    els.costLabel.textContent = `${money(allTimeCost())} all time`;
+  } else if (fraction > 1) {
+    els.costLabel.innerHTML =
+      `<span class="state">${money(cost.total - budget)} over</span> the ${money(budget)} budget`;
+  } else {
+    els.costLabel.innerHTML =
+      `<span class="state">${Math.round(fraction * 100)}%</span> of ${money(budget)}`;
+  }
+
+  els.costAsof.textContent = prices ? `rates ${prices.as_of}` : "no rates";
+  els.costBreakdown.textContent = costBreakdown(cost);
+}
+
+function costState(fraction) {
+  if (fraction >= 1) return "critical";
+  if (fraction >= 0.8) return "warning";
+  return "good";
+}
+
+/** One line of fine print that says what the figure is made of, and how
+ *  much of it was measured here rather than reported by the API. */
+function costBreakdown(cost) {
+  if (!prices) return "No rate table loaded — nothing priced.";
 
   const parts = Object.entries(cost.byKind)
     .filter(([, usd]) => usd > 0)
     .map(([kind, usd]) => `${kind} ${money(usd)}`);
 
-  if (!prices) els.costBreakdown.textContent = "Rates not loaded.";
-  else if (!parts.length) els.costBreakdown.textContent = `No spend yet · rates as of ${prices.as_of}`;
-  else els.costBreakdown.textContent = `${parts.join(" · ")} over ${cost.calls} calls`;
+  if (!parts.length && !cost.unpriced) return `${money(allTimeCost())} all time`;
+
+  const notes = [];
+  if (parts.length) notes.push(parts.join(" · "));
+  if (cost.estimatedLegs) notes.push(`${cost.estimatedLegs} timed here`);
+  if (cost.unpriced) notes.push(`${cost.unpriced} unpriced`);
+  return notes.join(" · ");
+}
+
+// --- budget ---------------------------------------------------------------
+// The meter needs a limit to read against, or the arc means nothing.
+
+function currentBudget() {
+  const value = parseFloat(els.budget.value);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function saveBudget() {
+  localStorage.setItem(BUDGET_KEY, els.budget.value);
+  renderCost();
+}
+
+function restoreBudget(fallback) {
+  const saved = localStorage.getItem(BUDGET_KEY);
+  els.budget.value = saved === null ? fallback : saved;
 }
 
 function renderProfile() {
@@ -703,6 +857,7 @@ async function loadPricing() {
   } catch {
     prices = null; // the ticker says so rather than inventing a number
   }
+  restoreBudget(prices ? prices.default_budget_usd : 0.25);
   renderCost();
 }
 
@@ -1041,7 +1196,7 @@ function startRecording() {
     ws.send(JSON.stringify({
       type: "utterance",
       mime,
-      seconds: (Date.now() - recordStartedAt) / 1000,
+      seconds: await clipSeconds(blob),
       data: await toBase64(blob),
     }));
   });
@@ -1122,6 +1277,27 @@ function watchLevels(stream, { onSpeech, onEnd, onNothing }) {
   }, VAD_INTERVAL_MS);
 
   return () => { clearInterval(timer); ctx.close().catch(() => {}); };
+}
+
+/** Exact decoded length of a clip, falling back to the wall clock.
+ *
+ * Wall-clock timing around MediaRecorder includes start-up lag and whatever
+ * the event loop was busy with. Decoding gives the real audio duration, which
+ * is what a per-minute rate is charged against. */
+async function clipSeconds(blob) {
+  const wallClock = (Date.now() - recordStartedAt) / 1000;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return wallClock;
+
+  const ctx = new Ctx();
+  try {
+    const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+    return decoded.duration;
+  } catch {
+    return wallClock; // codec the decoder will not take
+  } finally {
+    ctx.close().catch(() => {});
+  }
 }
 
 async function toBase64(blob) {
@@ -1224,6 +1400,7 @@ els.deleteSession.addEventListener("click", deleteViewedSession);
 els.forgetAll.addEventListener("click", forgetAll);
 els.exportBtn.addEventListener("click", exportJSON);
 els.costClear.addEventListener("click", clearTicker);
+els.budget.addEventListener("input", saveBudget);
 els.listeningMode.addEventListener("change", () => {
   const manual = els.listeningMode.value === "manual";
 

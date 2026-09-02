@@ -56,8 +56,15 @@ def _detail(response: httpx.Response, fallback: str) -> str:
         return response.text or fallback
 
 
-async def transcribe(api_key: str, audio: bytes, mime: str) -> str:
-    """Return what the student said, or "" if the clip held no speech."""
+async def transcribe(api_key: str, audio: bytes, mime: str) -> tuple[str, dict]:
+    """Return (what the student said, usage).
+
+    Text is "" when the clip held no speech. Usage is whatever the API reports
+    -- audio token counts on newer models, sometimes a duration, sometimes
+    nothing. The browser prefers it over its own clip timing when present,
+    because a measured wall clock is a guess about what gets billed and this
+    is not.
+    """
     files = {"file": (f"turn.{_extension(mime)}", audio, mime)}
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -74,7 +81,8 @@ async def transcribe(api_key: str, audio: bytes, mime: str) -> str:
     if response.is_error:
         raise PipelineError(response.status_code, _detail(response, "Transcription failed"))
 
-    return (response.json().get("text") or "").strip()
+    body = response.json()
+    return (body.get("text") or "").strip(), body.get("usage") or {}
 
 
 async def stream_reply(api_key: str, messages: list[dict]) -> AsyncIterator[dict]:

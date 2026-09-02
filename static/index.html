@@ -105,19 +105,40 @@
       <div class="chat-panels">
         <div class="mini-panel">
           <h3>Proficiency <span id="prof-count" class="tag"></span></h3>
-          <div class="gauge"><div class="gauge-fill" id="prof-fill"></div></div>
-          <p id="prof-label" class="gauge-label">Not assessed yet.</p>
+          <div class="dial">
+            <svg viewBox="0 0 120 84" role="img" aria-labelledby="prof-label">
+              <path class="dial-track" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
+              <g class="dial-ticks" id="prof-ticks"></g>
+              <path class="dial-fill" id="prof-arc" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
+            </svg>
+            <div class="dial-center">
+              <span class="dial-value" id="prof-value">--</span>
+            </div>
+          </div>
+          <p id="prof-label" class="dial-label">Not assessed yet.</p>
+          <p id="prof-note" class="fine"></p>
         </div>
 
         <div class="mini-panel">
-          <h3>Cost <span class="tag" title="Priced from a rate table in app/config.py — verify it.">estimate</span></h3>
-          <p class="ticker">
-            <span id="cost-session">$0.0000</span><span class="unit">session</span>
-            <span id="cost-total" class="secondary-figure">$0.0000</span><span class="unit">all time</span>
-          </p>
+          <h3>Cost <span class="tag" id="cost-asof">estimate</span></h3>
+          <div class="dial">
+            <svg viewBox="0 0 120 84" role="img" aria-labelledby="cost-label">
+              <path class="dial-track" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
+              <g class="dial-ticks" id="cost-ticks"></g>
+              <path class="dial-fill" id="cost-arc" d="M 25.36 72 A 40 40 0 1 1 94.64 72" />
+            </svg>
+            <div class="dial-center">
+              <span class="dial-value" id="cost-session">$0.0000</span>
+            </div>
+          </div>
+          <p id="cost-label" class="dial-label">of budget</p>
+          <svg class="spark" id="cost-spark" viewBox="0 0 100 22" preserveAspectRatio="none"
+               role="img" aria-label="Cumulative spend this session"></svg>
           <p id="cost-breakdown" class="fine"></p>
           <div class="panel-actions">
-            <button id="cost-clear" class="ghost">Clear ticker</button>
+            <label class="inline-field" for="budget">Budget $</label>
+            <input id="budget" class="mini-input" type="number" min="0" step="0.05" />
+            <button id="cost-clear" class="ghost">Clear</button>
           </div>
         </div>
 

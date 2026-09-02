@@ -125,24 +125,33 @@ API usage and real graded answers -- nothing is inferred from turn counts.
 
 ### Cost ticker
 
-Both engines report raw usage and the browser prices all of it through one
-table, so Realtime and pipeline spend land in the same figure.
+The API returns no cost figure on any request, so a per-turn cost is always
+reconstructed. What matters is how good the inputs are, and the panel says so
+rather than presenting one confident number.
 
-- The pipeline socket forwards the `usage` block from each completion (including
-  how many prompt tokens were served from cache) and the measured length of each
-  audio clip.
-- Realtime attaches token usage to `response.done` on the data channel; the
-  browser times `speech_started` -> `speech_stopped` to price input
-  transcription, which is billed per minute and reported nowhere else.
+**Quantities.** Token counts come from OpenAI: the `usage` block on each
+completion (cached tokens included), and `response.usage` on Realtime's
+`response.done`. Transcription is billed per minute *and* per 1M audio tokens,
+so the ticker prefers whatever usage the API reports and only falls back to
+measuring the clip itself. When it does measure, it decodes the recording for
+its true duration rather than timing the recorder with a wall clock, and the
+fine print counts how many legs were measured that way.
 
-**The rate table in `app/config.py` is the one thing you must check.** It is
-labelled `PRICING_AS_OF` and the panel says "estimate" for a reason: published
-rates move, and a stale table produces a confident wrong number. Correct
-`PRICING` and everything downstream follows. A model with no rate on file
-contributes nothing rather than silently costing zero.
+**Rates** come from `PRICING` in `app/config.py`, checked against
+developers.openai.com on `PRICING_AS_OF`. One caveat is recorded there: the
+pricing page lists `gpt-realtime`, while `REALTIME_MODEL` is a dated snapshot
+that is not priced separately, so it is billed at the base model's rates.
 
-**Clear ticker** resets the figure for the session you are looking at. The
-all-time figure beside it is the sum across everything still in the archive.
+**When it cannot price something, it says so.** A model with no rate on file,
+or a usage payload that reports tokens but prices to zero because its shape
+moved, is counted as `unpriced` in the fine print instead of quietly costing
+nothing. Silent under-reporting was the failure mode worth designing against.
+
+The meter reads spend against an editable per-session budget
+(`DEFAULT_SESSION_BUDGET_USD`). A budget is what makes an arc meaningful --
+without a limit to read against, a dial for a running total would be
+decoration. The fill turns amber at 80% and red at 100%, and the sparkline
+below traces cumulative spend across the session's calls.
 
 ### Proficiency gauge
 
@@ -163,6 +172,27 @@ Two decisions worth knowing:
 The gauge is an exponentially weighted average (`PROF_ALPHA`, 0.3), so it tracks
 where the student is *now* rather than averaging away a recovery. `off_topic`
 scores nothing either way.
+
+### About those two dials
+
+Both meters are the same 240-degree arc so they read as a pair. Proficiency is
+a ratio against a limit and cost is a ratio against a budget -- which is what a
+meter is for. Neither is a donut or a pie; nothing is being compared by angle.
+
+Three rules they follow, all worth keeping if you edit them:
+
+- **The fill carries state, one colour at a time,** from the fixed status
+  palette (`--good` / `--warning` / `--critical`). Those three were validated
+  against this app's actual panel colour: all clear 3:1 contrast, and the
+  worst normal-vision pair separation is Delta E 27.6, well over the 15 floor.
+  A fourth status step was dropped because it collided with amber.
+- **The state is always named in the label** underneath, so the colour is never
+  the only thing carrying the meaning.
+- **The threshold ticks are neutral grey,** not coloured. They are scaffolding
+  showing where the bands fall, not state.
+
+Arc geometry is hardcoded in `index.html` and re-derived in
+`tests/frontend_math.test.js`, so the fill cannot drift off the track unnoticed.
 
 ### Learner profile
 
@@ -240,9 +270,12 @@ that file via `/api/modes`.
 - History is per-browser `localStorage`. Clearing site data loses it, it does
   not follow a student to another machine, and a long archive can hit the
   storage quota (the status line says so; export and Forget all).
-- **The `PRICING` table is unverified.** It is a starting point, not a source of
-  truth -- check it against the current pricing page before quoting any figure
-  the ticker shows.
+- The `PRICING` table was checked on `PRICING_AS_OF` and rates move. `REALTIME_MODEL`
+  is billed at the base `gpt-realtime` rate because the dated snapshot is not
+  priced separately.
+- Clip timing is only used when the API reports no usage of its own. Decoded
+  duration is exact, but whether OpenAI rounds up or applies a minimum is not
+  something this can know -- that leg is the softest figure on screen.
 - Grading is one small model's opinion of one exchange, with no view of the
   lesson text. It is good enough to steer a gauge, not to grade a course.
 - No auth or rate limiting.

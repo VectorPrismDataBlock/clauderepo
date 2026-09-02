@@ -18,7 +18,7 @@ const RATES = {
     "test-realtime": { text_input: 4, cached_input: 0.4, audio_input: 32,
                        text_output: 16, audio_output: 64 },
     "test-chat": { text_input: 0.15, cached_input: 0.075, text_output: 0.6 },
-    "test-stt": { per_minute: 0.003 },
+    "test-stt": { per_minute: 0.003, audio_input: 1.25 },
   },
   verdict_scores: { correct: 1, partial: 0.5, incorrect: 0 },
   as_of: "fixture",
@@ -42,6 +42,8 @@ function loadAppFunctions() {
       out.proficiencyOf = proficiencyOf;
       out.proficiencyBand = proficiencyBand;
       out.money = money;
+      out.dialPoint = dialPoint;
+      out.DIAL = DIAL;
       out.setPrices = (p) => { prices = p; };
     `)(
     { getElementById: stub, createElement: stub },
@@ -81,8 +83,32 @@ near("chat with no cache detail bills everything fresh",
     prompt_tokens: 1000, completion_tokens: 100 } }).usd,
   (1000 * 0.15 + 100 * 0.6) / 1e6);
 
-near("stt bills per minute of audio",
+near("stt falls back to the measured clip length",
   app.priceUsage("stt", "test-stt", { seconds: 30 }).usd, 0.0015);
+is("...and says the number was measured here",
+  app.priceUsage("stt", "test-stt", { seconds: 30 }).measured, "measured");
+
+near("stt prefers the audio tokens the API reported",
+  app.priceUsage("stt", "test-stt", { seconds: 30, usage: {
+    type: "tokens", input_tokens: 500,
+    input_token_details: { audio_tokens: 480 } } }).usd,
+  (480 * 1.25) / 1e6);
+is("...and says so",
+  app.priceUsage("stt", "test-stt", { seconds: 30, usage: {
+    type: "tokens", input_tokens: 500,
+    input_token_details: { audio_tokens: 480 } } }).measured, "reported");
+
+near("stt honours a duration the API reported over our own",
+  app.priceUsage("stt", "test-stt", { seconds: 99, usage: {
+    type: "duration", seconds: 30 } }).usd, 0.0015);
+
+// A payload shape that moved must be visible, not silently free.
+is("realtime tokens that price to zero are flagged unpriced",
+  app.priceUsage("realtime", "test-realtime",
+    { usage: { input_tokens: 900, output_tokens: 100, moved: {} } }).unpriced, true);
+is("chat tokens that price to zero are flagged unpriced",
+  app.priceUsage("chat", "test-chat", { usage: { prompt_tokens: 0, completion_tokens: 0,
+    total_tokens: 500 } }).unpriced, undefined);
 
 near("realtime splits cached text from cached audio",
   app.priceUsage("realtime", "test-realtime", { usage: {
@@ -111,6 +137,20 @@ near("partial credit counts for half", app.proficiencyOf(graded("partial")), 0.5
 is("bands read low at the bottom", app.proficiencyBand(0.2).cls, "low");
 is("bands read mid in the middle", app.proficiencyBand(0.49).label, "Building");
 is("bands top out at strong", app.proficiencyBand(0.95).label, "Strong");
+
+// --- dial geometry ---
+// The arc path is hardcoded in index.html; if these drift the fill stops
+// lining up with the track.
+const startPoint = app.dialPoint(0, app.DIAL.r);
+const endPoint = app.dialPoint(1, app.DIAL.r);
+near("dial starts where the markup path starts (x)", Number(startPoint.x.toFixed(2)), 25.36);
+near("dial starts where the markup path starts (y)", Number(startPoint.y.toFixed(2)), 72);
+near("dial ends where the markup path ends (x)", Number(endPoint.x.toFixed(2)), 94.64);
+near("dial ends where the markup path ends (y)", Number(endPoint.y.toFixed(2)), 72);
+near("dash length matches the CSS dasharray",
+  Number(((app.DIAL.sweep * Math.PI / 180) * app.DIAL.r).toFixed(2)), 167.55);
+near("half the sweep sits at the top of the arc",
+  Number(app.dialPoint(0.5, app.DIAL.r).y.toFixed(2)), app.DIAL.cy - app.DIAL.r);
 
 // --- formatting ---
 is("sub-cent amounts keep four places", app.money(0.00042), "$0.0004");

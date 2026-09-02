@@ -86,7 +86,7 @@ class TranscribeTests(unittest.TestCase):
     def test_returns_stripped_text_and_names_the_file_by_mime(self):
         FakeClient.response = FakeResponse({"text": "  photosynthesis  "})
         with patch("app.pipeline.httpx.AsyncClient", FakeClient):
-            said = run(transcribe("k", b"audio", "audio/mp4;codecs=opus"))
+            said, _ = run(transcribe("k", b"audio", "audio/mp4;codecs=opus"))
 
         self.assertEqual(said, "photosynthesis")
         self.assertEqual(FakeClient.last_kwargs["files"]["file"][0], "turn.mp4")
@@ -94,7 +94,24 @@ class TranscribeTests(unittest.TestCase):
     def test_silence_transcribes_to_empty_string(self):
         FakeClient.response = FakeResponse({"text": "   "})
         with patch("app.pipeline.httpx.AsyncClient", FakeClient):
-            self.assertEqual(run(transcribe("k", b"", "audio/webm")), "")
+            said, _ = run(transcribe("k", b"", "audio/webm"))
+        self.assertEqual(said, "")
+
+    def test_passes_through_whatever_usage_the_api_reports(self):
+        reported = {"type": "tokens", "input_tokens": 240,
+                    "input_token_details": {"audio_tokens": 210}}
+        FakeClient.response = FakeResponse({"text": "hi", "usage": reported})
+        with patch("app.pipeline.httpx.AsyncClient", FakeClient):
+            _, usage = run(transcribe("k", b"a", "audio/webm"))
+
+        # Real token counts beat our own clip timing, so they must survive.
+        self.assertEqual(usage, reported)
+
+    def test_missing_usage_is_an_empty_dict_not_none(self):
+        FakeClient.response = FakeResponse({"text": "hi"})
+        with patch("app.pipeline.httpx.AsyncClient", FakeClient):
+            _, usage = run(transcribe("k", b"a", "audio/webm"))
+        self.assertEqual(usage, {})
 
     def test_unknown_mime_falls_back_to_webm(self):
         self.assertEqual(_extension("audio/weird"), "webm")

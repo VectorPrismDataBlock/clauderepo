@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from .assess import AssessError, assess
 from .config import (
     ASSESS_MODEL,
+    DEFAULT_SESSION_BUDGET_USD,
     ENGINES,
     INPUT_TRANSCRIPTION_MODEL,
     PIPELINE_CHAT_MODEL,
@@ -68,6 +69,7 @@ def pricing():
     return {
         "as_of": PRICING_AS_OF,
         "rates": PRICING,
+        "default_budget_usd": DEFAULT_SESSION_BUDGET_USD,
         "models": {
             "realtime": REALTIME_MODEL,
             "realtime_stt": INPUT_TRANSCRIPTION_MODEL,
@@ -233,13 +235,17 @@ async def pipeline_ws(websocket: WebSocket, session_id: str):
                 )
                 continue
 
-            said = await transcribe(session.api_key, audio, message.get("mime") or "audio/webm")
-            # Transcription is billed per minute of audio, and the browser is
-            # the only side that knows how long the clip was.
+            said, stt_usage = await transcribe(
+                session.api_key, audio, message.get("mime") or "audio/webm"
+            )
+            # Send both: whatever the API reported, and the clip length the
+            # browser measured. The ticker prefers the former and falls back to
+            # the latter, so it can say which one produced the figure.
             await _report_usage(
                 websocket,
                 "stt",
                 PIPELINE_TRANSCRIPTION_MODEL,
+                usage=stt_usage,
                 seconds=float(message.get("seconds") or 0),
             )
             if not said:

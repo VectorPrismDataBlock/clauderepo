@@ -26,9 +26,14 @@ async def fake_stream_reply(api_key, messages):
     yield {"usage": REPLY_USAGE}
 
 
+STT_USAGE = {"type": "tokens", "input_tokens": 190,
+             "input_token_details": {"audio_tokens": 176}}
+
+
 async def fake_transcribe(api_key, audio, mime):
     # The client sends a one-byte clip to mean "this held no speech".
-    return "" if audio == b"\x00" else "The mitochondria."
+    said = "" if audio == b"\x00" else "The mitochondria."
+    return said, STT_USAGE
 
 
 def utterance(data: bytes, seconds: float = 3.0):
@@ -129,6 +134,8 @@ class PipelineSocketTests(unittest.TestCase):
         stt = [u for u in self.usage if u["kind"] == "stt"]
         chat = [u for u in self.usage if u["kind"] == "chat"]
         self.assertEqual(stt[0]["seconds"], 4.5)
+        # Reported usage rides along so the ticker prefers it over our clock.
+        self.assertEqual(stt[0]["usage"], STT_USAGE)
         self.assertEqual(chat[0]["usage"], REPLY_USAGE)
 
     def test_silence_is_skipped_instead_of_billed_as_a_completion(self):
